@@ -1,0 +1,14 @@
+.DS_Store
+.build/
+release/
+vendor/runtime/
+assets/*.iconset/
+assets/*.png
+assets/*.icns
+/.build
+/Packages
+xcuserdata/
+DerivedData/
+.swiftpm/configuration/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
