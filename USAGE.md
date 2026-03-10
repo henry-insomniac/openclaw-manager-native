@@ -81,6 +81,17 @@
 
 第一次启动时，界面可能会有几秒加载时间，这属于正常现象。
 
+另外，从现在这个版本开始，软件会在 macOS 顶部菜单栏放一个常驻小工具。
+
+你可以不用每次都切回主窗口，直接在菜单栏里完成这些动作：
+
+- 查看当前激活账号
+- 查看推荐切换目标
+- 查看自动切换是否开启
+- 一键切到推荐账号
+- 一键执行一轮探测
+- 重新打开主窗口
+
 ## 第一次使用，最推荐的操作顺序
 
 ### 第 1 步：先看主界面有没有直接出现 profile
@@ -287,3 +298,29 @@ OpenClaw Manager Native -> 查看当前配置
 
 `OpenClaw Manager Native` 是一个本地自托管的第三方工具。它的目标是统一管理你自己 Mac 上的 OpenClaw / Codex 本地环境，而不是替代官方服务或作为共享账号平台。
 
+
+
+## OpenClaw 卡死时怎么办
+
+如果你遇到的是“进程还活着，但对话不再回复”，优先启用 app 内置的稳定守护。它会持续监控 `gateway.log` 和会话锁，在检测到 `embedded run timeout`、`lane wait exceeded`、`Slow listener detected` 或长时间卡住的会话锁后，自动重启 `ai.openclaw.gateway`。
+
+推荐操作路径：
+
+```text
+稳定守护 -> 启用稳定守护
+稳定守护 -> 查看守护状态
+稳定守护 -> 立即巡检并恢复
+```
+
+什么时候需要重新启用一次：
+
+- 你修改了 OpenClaw 根目录
+- 你把 app 换到了另一台 Mac 上
+- 你想让 watchdog 开始监控另一组 `.openclaw` 数据
+
+如果你在源码目录调试，也可以继续用脚本：
+
+```bash
+bash ./scripts/install-watchdog.sh
+bash ./scripts/watchdog-status.sh
+```

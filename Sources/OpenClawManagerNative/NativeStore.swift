@@ -1,0 +1,638 @@
+@preconcurrency import Combine
+@preconcurrency import Foundation
+
+struct RuntimeConfig: Codable, Equatable, Sendable {
+    var openclawHomeDir: String
+    var codexHomeDir: String
+
+    static func `default`() -> RuntimeConfig {
+        RuntimeConfig(
+            openclawHomeDir: NSHomeDirectory(),
+            codexHomeDir: NSHomeDirectory()
+        )
+    }
+}
+
+struct WatchdogState: Codable, Equatable, Sendable {
+    var createdAt: String?
+    var restartCount: Int?
+    var lastRestartAtMs: Int?
+    var lastRestartReason: String?
+    var lastHealthyAt: String?
+    var lastIssueAt: String?
+    var lastIssueReason: String?
+    var lastLoopAt: String?
+    var lastLoopResult: String?
+}
+
+struct WatchdogSummary: Equatable, Sendable {
+    var installed: Bool
+    var configuredForCurrentRoot: Bool
+    var monitoredStateDir: String?
+    var state: WatchdogState?
+
+    var statusLine: String {
+        if !installed {
+            return "未启用"
+        }
+        if !configuredForCurrentRoot {
+            return "已启用（目录不匹配）"
+        }
+        if let result = state?.lastLoopResult, result == "healthy" {
+            return "已启用（运行正常）"
+        }
+        if let result = state?.lastLoopResult, !result.isEmpty {
+            return "已启用（最近结果: \(result)）"
+        }
+        return "已启用"
+    }
+}
+
+struct ShellCommandResult: Sendable {
+    var status: Int32
+    var stdout: String
+    var stderr: String
+}
+
+enum ProfileStatus: String, Codable, CaseIterable, Identifiable, Sendable {
+    case healthy
+    case draining
+    case cooldown
+    case exhausted
+    case reauthRequired = "reauth_required"
+    case unknown
+
+    var id: String { rawValue }
+}
+
+enum LoginFlowStatus: String, Codable, Sendable {
+    case pending
+    case completed
+    case failed
+    case expired
+}
+
+enum ActivationTrigger: String, Codable, Sendable {
+    case manual
+    case auto
+    case recommended
+}
+
+enum RuntimeMode: String, Codable, Sendable {
+    case native
+    case desktop
+    case docker
+    case web
+}
+
+enum NativeSection: String, CaseIterable, Identifiable, Sendable {
+    case overview
+    case profiles
+    case settings
+    case diagnostics
+    case deployment
+
+    var id: String { rawValue }
+}
+
+enum SupportRepairAction: String, Codable, CaseIterable, Identifiable, Sendable {
+    case runWatchdogCheck = "run_watchdog_check"
+    case restartGateway = "restart_gateway"
+    case reinstallWatchdog = "reinstall_watchdog"
+    case openGatewayLog = "open_gateway_log"
+    case openWatchdogLog = "open_watchdog_log"
+
+    var id: String { rawValue }
+}
+
+struct UsageWindow: Codable, Equatable, Sendable {
+    var label: String
+    var usedPercent: Int
+    var leftPercent: Int
+    var resetAt: String?
+    var resetInMs: Int?
+}
+
+struct UsageSnapshot: Codable, Equatable, Sendable {
+    var plan: String?
+    var fiveHour: UsageWindow?
+    var week: UsageWindow?
+}
+
+struct ManagedProfileSnapshot: Decodable, Equatable, Identifiable, Sendable {
+    var name: String
+    var isDefault: Bool
+    var isActive: Bool
+    var isRecommended: Bool
+    var stateDir: String
+    var authStorePath: String
+    var hasConfig: Bool
+    var hasAuthStore: Bool
+    var authMode: String
+    var profileId: String?
+    var accountEmail: String?
+    var accountId: String?
+    var codexHome: String
+    var codexConfigPath: String
+    var codexAuthPath: String
+    var hasCodexConfig: Bool
+    var hasCodexAuth: Bool
+    var codexAuthMode: String?
+    var codexAccountId: String?
+    var codexLastRefreshAt: String?
+    var tokenExpiresAt: String?
+    var tokenExpiresInMs: Int?
+    var status: ProfileStatus
+    var statusReason: String
+    var quota: UsageSnapshot
+    var lastError: String?
+
+    var id: String { name }
+}
+
+struct AutomationSnapshot: Decodable, Equatable, Sendable {
+    var enabled: Bool
+    var probeIntervalMinMs: Int
+    var probeIntervalMaxMs: Int
+    var pollIntervalMs: Int
+    var fiveHourDrainPercent: Int
+    var weekDrainPercent: Int
+    var autoSwitchStatuses: [ProfileStatus]
+    var lastProbeAt: String?
+    var nextProbeAt: String?
+    var lastScheduledDelayMs: Int?
+    var lastAutoActivationAt: String?
+    var lastAutoActivationFrom: String?
+    var lastAutoActivationTo: String?
+    var lastAutoActivationReason: String?
+    var lastTickError: String?
+    var wrapperCommand: String
+    var codexWrapperCommand: String
+}
+
+struct ManagerSummary: Decodable, Equatable, Sendable {
+    var generatedAt: String
+    var activeProfileName: String?
+    var recommendedProfileName: String?
+    var automation: AutomationSnapshot
+    var runtime: RuntimeOverview
+    var profiles: [ManagedProfileSnapshot]
+}
+
+struct RuntimeOverview: Decodable, Equatable, Sendable {
+    struct Roots: Decodable, Equatable, Sendable {
+        var openclawHomeDir: String
+        var codexHomeDir: String
+        var managerDir: String
+        var defaultOpenClawStateDir: String
+        var defaultCodexHome: String
+        var oauthCallbackUrl: String
+        var oauthCallbackBindHost: String
+    }
+
+    struct Daemon: Decodable, Equatable, Sendable {
+        var pid: Int
+        var host: String
+        var port: Int?
+        var apiBaseUrl: String?
+        var startedAt: String
+        var uptimeMs: Int
+        var probeIntervalMinMs: Int
+        var probeIntervalMaxMs: Int
+        var pollIntervalMs: Int
+        var nextProbeAt: String?
+        var autoActivateEnabled: Bool
+        var loopScheduled: Bool
+        var loopRunning: Bool
+    }
+
+    struct Switching: Decodable, Equatable, Sendable {
+        var activeProfileName: String?
+        var recommendedProfileName: String?
+        var totalProfiles: Int
+        var healthyProfiles: Int
+        var drainingProfiles: Int
+        var riskyProfiles: Int
+        var totalActivations: Int
+        var manualActivations: Int
+        var autoActivations: Int
+        var recommendedActivations: Int
+        var lastActivationAt: String?
+        var lastActivationDurationMs: Int?
+        var averageActivationDurationMs: Int?
+        var lastActivationTrigger: ActivationTrigger?
+        var lastActivationReason: String?
+        var lastSyncedAt: String?
+    }
+
+    struct Compatibility: Decodable, Equatable, Sendable {
+        var allowedOrigins: [String]
+        var allowLocalhostDev: Bool
+        var browserShellSupported: Bool
+        var nativeShellRecommended: Bool
+        var wrapperCommand: String
+        var codexWrapperCommand: String
+    }
+
+    var generatedAt: String
+    var mode: RuntimeMode
+    var roots: Roots
+    var daemon: Daemon
+    var switching: Switching
+    var compatibility: Compatibility
+}
+
+struct AutomationTickResult: Decodable, Equatable, Sendable {
+    var switched: Bool
+    var fromProfileName: String?
+    var toProfileName: String?
+    var reason: String
+    var summary: ManagerSummary
+}
+
+struct LoginFlowSnapshot: Decodable, Equatable, Identifiable, Sendable {
+    var id: String
+    var profileName: String
+    var status: LoginFlowStatus
+    var authUrl: String
+    var browserOpened: Bool
+    var startedAt: String
+    var expiresAt: String
+    var completedAt: String?
+    var error: String?
+}
+
+struct SupportLogEvent: Decodable, Equatable, Identifiable, Sendable {
+    var timestamp: String
+    var kind: String
+    var line: String
+
+    var id: String { "\(timestamp)-\(kind)-\(line)" }
+}
+
+struct SupportSummary: Decodable, Equatable, Sendable {
+    struct Gateway: Decodable, Equatable, Sendable {
+        var reachable: Bool
+        var url: String?
+        var connectLatencyMs: Int?
+        var version: String?
+        var host: String?
+        var error: String?
+    }
+
+    struct Discord: Decodable, Equatable, Sendable {
+        var status: String
+        var lastLoggedInAt: String?
+        var lastDisconnectAt: String?
+        var disconnectCount15m: Int
+        var disconnectCount60m: Int
+        var recentEvents: [SupportLogEvent]
+        var recommendation: String
+    }
+
+    struct Watchdog: Decodable, Equatable, Sendable {
+        var installed: Bool
+        var monitoredStateDir: String?
+        var lastLoopResult: String?
+        var lastHealthyAt: String?
+        var lastRestartAt: String?
+        var restartCount: Int?
+        var statePath: String
+        var logPath: String
+        var statusLine: String
+    }
+
+    struct Environment: Decodable, Equatable, Sendable {
+        var primaryInterface: String?
+        var gatewayAddress: String?
+        var vpnLikelyActive: Bool
+        var vpnServiceNames: [String]
+        var proxyLikelyEnabled: Bool
+        var proxySummary: String?
+        var lastSleepAt: String?
+        var lastWakeAt: String?
+        var sleepWakeCount60m: Int
+        var riskLevel: String
+        var riskySignals: [String]
+        var recommendation: String
+    }
+
+    var collectedAt: String
+    var gateway: Gateway
+    var discord: Discord
+    var watchdog: Watchdog
+    var environment: Environment
+}
+
+struct SupportRepairResult: Decodable, Equatable, Sendable {
+    var ok: Bool
+    var action: SupportRepairAction
+    var message: String
+    var output: String?
+    var summary: SupportSummary
+}
+
+struct NativeLocalSnapshot: Equatable, Sendable {
+    var config: RuntimeConfig
+    var runtimeRootPath: String?
+    var settingsPath: String?
+    var appSupportPath: String?
+    var apiBaseURL: String?
+    var callbackURL: String?
+    var watchdog: WatchdogSummary
+    var gatewayLogPath: String
+    var watchdogLogPath: String
+}
+
+struct AutomationSettingsPatch: Encodable, Equatable, Sendable {
+    var autoActivateEnabled: Bool
+    var probeIntervalMinMs: Int
+    var probeIntervalMaxMs: Int
+    var fiveHourDrainPercent: Int
+    var weekDrainPercent: Int
+    var autoSwitchStatuses: [ProfileStatus]
+}
+
+struct NativeNotice: Equatable, Identifiable, Sendable {
+    enum Tone: String, Sendable {
+        case info
+        case success
+        case warning
+        case error
+    }
+
+    var id = UUID()
+    var tone: Tone
+    var title: String
+    var detail: String?
+}
+
+struct NativeAppActions: Sendable {
+    var refreshAll: @Sendable (Bool) -> Void = { _ in }
+    var pollLoginFlow: @Sendable (String) -> Void = { _ in }
+    var createProfile: @Sendable (String) -> Void = { _ in }
+    var loginProfile: @Sendable (String) -> Void = { _ in }
+    var probeProfile: @Sendable (String) -> Void = { _ in }
+    var activateProfile: @Sendable (String) -> Void = { _ in }
+    var activateRecommended: @Sendable () -> Void = {}
+    var saveAutomation: @Sendable (AutomationSettingsPatch) -> Void = { _ in }
+    var runAutomationTick: @Sendable () -> Void = {}
+    var selectOpenClawRoot: @Sendable () -> Void = {}
+    var resetOpenClawRoot: @Sendable () -> Void = {}
+    var selectCodexRoot: @Sendable () -> Void = {}
+    var resetCodexRoot: @Sendable () -> Void = {}
+    var openSettingsFile: @Sendable () -> Void = {}
+    var openAppSupportDirectory: @Sendable () -> Void = {}
+    var openManagerStateDirectory: @Sendable () -> Void = {}
+    var restartServices: @Sendable () -> Void = {}
+    var supportRepair: @Sendable (SupportRepairAction) -> Void = { _ in }
+    var openURL: @Sendable (URL) -> Void = { _ in }
+    var openGatewayLog: @Sendable () -> Void = {}
+    var openWatchdogLog: @Sendable () -> Void = {}
+    var openWatchdogStateDirectory: @Sendable () -> Void = {}
+}
+
+final class NativeAppStore: ObservableObject, @unchecked Sendable {
+    @Published var summary: ManagerSummary?
+    @Published var supportSummary: SupportSummary?
+    @Published var loginFlow: LoginFlowSnapshot?
+    @Published var selectedSection: NativeSection = .overview
+    @Published var selectedProfileName: String?
+    @Published var busyKeys: Set<String> = []
+    @Published var notice: NativeNotice?
+    @Published var isLoading = true
+    @Published var localSnapshot = NativeLocalSnapshot(
+        config: .default(),
+        runtimeRootPath: nil,
+        settingsPath: nil,
+        appSupportPath: nil,
+        apiBaseURL: nil,
+        callbackURL: nil,
+        watchdog: WatchdogSummary(installed: false, configuredForCurrentRoot: false, monitoredStateDir: nil, state: nil),
+        gatewayLogPath: "",
+        watchdogLogPath: ""
+    )
+
+    private var actions = NativeAppActions()
+    private var started = false
+    private var refreshTimer: Timer?
+    private var loginTimer: Timer?
+
+    var profiles: [ManagedProfileSnapshot] {
+        summary?.profiles ?? []
+    }
+
+    var automation: AutomationSnapshot? {
+        summary?.automation
+    }
+
+    var runtime: RuntimeOverview? {
+        summary?.runtime
+    }
+
+    var activeProfile: ManagedProfileSnapshot? {
+        profiles.first(where: \.isActive)
+    }
+
+    var recommendedProfile: ManagedProfileSnapshot? {
+        profiles.first(where: \.isRecommended)
+    }
+
+    var selectedProfile: ManagedProfileSnapshot? {
+        if let selectedProfileName, let matched = profiles.first(where: { $0.name == selectedProfileName }) {
+            return matched
+        }
+        return activeProfile ?? recommendedProfile ?? profiles.first
+    }
+
+    func configure(actions: NativeAppActions) {
+        self.actions = actions
+    }
+
+    func start() {
+        guard !started else { return }
+        started = true
+        actions.refreshAll(false)
+        scheduleRefreshTimer()
+    }
+
+    func stop() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
+        loginTimer?.invalidate()
+        loginTimer = nil
+        started = false
+    }
+
+    func scheduleRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            self?.actions.refreshAll(true)
+        }
+    }
+
+    func restartLoginFlowTimerIfNeeded() {
+        loginTimer?.invalidate()
+        guard let loginFlow, loginFlow.status == .pending else {
+            loginTimer = nil
+            return
+        }
+
+        loginTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            guard let self, let activeFlow = self.loginFlow, activeFlow.status == .pending else {
+                return
+            }
+            self.actions.pollLoginFlow(activeFlow.id)
+        }
+    }
+
+    func applyLocalSnapshot(_ snapshot: NativeLocalSnapshot) {
+        localSnapshot = snapshot
+    }
+
+    func applyRefresh(summary: ManagerSummary, supportSummary: SupportSummary?) {
+        self.summary = summary
+        self.supportSummary = supportSummary
+        isLoading = false
+        syncSelectedProfile()
+    }
+
+    func applyRefreshError(_ message: String, silent: Bool) {
+        if !silent {
+            isLoading = false
+            showNotice(.error, title: "读取状态失败", detail: message)
+        }
+    }
+
+    func applyLoginFlow(_ flow: LoginFlowSnapshot) {
+        loginFlow = flow
+        if flow.status != .pending {
+            actions.refreshAll(true)
+        }
+        restartLoginFlowTimerIfNeeded()
+    }
+
+    func clearLoginFlow() {
+        loginFlow = nil
+        restartLoginFlowTimerIfNeeded()
+    }
+
+    func setBusy(_ key: String, active: Bool) {
+        if active {
+            busyKeys.insert(key)
+        } else {
+            busyKeys.remove(key)
+        }
+    }
+
+    func isBusy(_ key: String) -> Bool {
+        busyKeys.contains(key)
+    }
+
+    func showNotice(_ tone: NativeNotice.Tone, title: String, detail: String? = nil) {
+        notice = NativeNotice(tone: tone, title: title, detail: detail)
+    }
+
+    func dismissNotice() {
+        notice = nil
+    }
+
+    func syncSelectedProfile() {
+        if let selectedProfileName, profiles.contains(where: { $0.name == selectedProfileName }) {
+            return
+        }
+        selectedProfileName = selectedProfile?.name
+    }
+
+    func selectProfile(_ name: String?) {
+        selectedProfileName = name
+        selectedSection = .profiles
+    }
+
+    func openPendingLoginInBrowser() {
+        guard let authURL = loginFlow?.authUrl, let url = URL(string: authURL) else {
+            return
+        }
+        actions.openURL(url)
+    }
+
+    func createProfile(named name: String) {
+        actions.createProfile(name)
+    }
+
+    func refreshAll(silent: Bool = false) {
+        actions.refreshAll(silent)
+    }
+
+    func login(profileName: String) {
+        actions.loginProfile(profileName)
+    }
+
+    func probe(profileName: String) {
+        actions.probeProfile(profileName)
+    }
+
+    func activate(profileName: String) {
+        actions.activateProfile(profileName)
+    }
+
+    func activateRecommended() {
+        actions.activateRecommended()
+    }
+
+    func saveAutomation(_ patch: AutomationSettingsPatch) {
+        actions.saveAutomation(patch)
+    }
+
+    func runAutomationTick() {
+        actions.runAutomationTick()
+    }
+
+    func pickOpenClawRoot() {
+        actions.selectOpenClawRoot()
+    }
+
+    func resetOpenClawRoot() {
+        actions.resetOpenClawRoot()
+    }
+
+    func pickCodexRoot() {
+        actions.selectCodexRoot()
+    }
+
+    func resetCodexRoot() {
+        actions.resetCodexRoot()
+    }
+
+    func openSettingsFile() {
+        actions.openSettingsFile()
+    }
+
+    func openAppSupportDirectory() {
+        actions.openAppSupportDirectory()
+    }
+
+    func openManagerStateDirectory() {
+        actions.openManagerStateDirectory()
+    }
+
+    func restartServices() {
+        actions.restartServices()
+    }
+
+    func repair(_ action: SupportRepairAction) {
+        actions.supportRepair(action)
+    }
+
+    func openGatewayLog() {
+        actions.openGatewayLog()
+    }
+
+    func openWatchdogLog() {
+        actions.openWatchdogLog()
+    }
+
+    func openWatchdogStateDirectory() {
+        actions.openWatchdogStateDirectory()
+    }
+}

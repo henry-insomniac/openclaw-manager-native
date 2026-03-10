@@ -18,10 +18,8 @@ let package = Package(
             name: "OpenClawManagerNative",
             path: "Sources/OpenClawManagerNative",
             linkerSettings: [
-                .linkedFramework("AppKit"),
-                .linkedFramework("WebKit")
+                .linkedFramework("AppKit")
             ]
         )
     ]
 )
-
