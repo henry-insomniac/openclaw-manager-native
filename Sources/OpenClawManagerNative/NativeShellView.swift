@@ -247,6 +247,102 @@ private func profileCapabilitySummary(_ profile: ManagedProfileSnapshot) -> Stri
     return "\(openclaw) · \(codex)"
 }
 
+private struct GatewayDiagnosis {
+    var headline: String
+    var detail: String
+    var rawError: String?
+    var prefersSettings: Bool
+    var prefersRestartServices: Bool
+}
+
+private enum DiagnosticActionKind {
+    case openSettings
+    case restartServices
+    case support(SupportRepairAction)
+    case openGatewayLog
+    case openWatchdogLog
+}
+
+private struct DiagnosticActionPlan {
+    var title: String
+    var systemImage: String
+    var action: DiagnosticActionKind
+    var prominent: Bool
+}
+
+private struct DiagnosticPlan {
+    var headline: String
+    var impact: String
+    var detail: String
+    var accent: Color
+    var primary: DiagnosticActionPlan?
+    var secondary: DiagnosticActionPlan?
+    var tertiary: DiagnosticActionPlan?
+}
+
+private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
+    guard let summary else {
+        return GatewayDiagnosis(
+            headline: "等待网关诊断",
+            detail: "原生 daemon 还没有返回网关状态，通常是刚启动或仍在刷新。",
+            rawError: nil,
+            prefersSettings: false,
+            prefersRestartServices: false
+        )
+    }
+
+    if summary.gateway.reachable {
+        return GatewayDiagnosis(
+            headline: "Gateway 正常响应",
+            detail: "OpenClaw gateway 已经可达，当前不需要额外修复动作。",
+            rawError: nil,
+            prefersSettings: false,
+            prefersRestartServices: false
+        )
+    }
+
+    let rawError = summary.gateway.error?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalized = rawError?.lowercased() ?? ""
+
+    if normalized.contains("enoent") && normalized.contains("openclaw") {
+        return GatewayDiagnosis(
+            headline: "未找到 OpenClaw CLI",
+            detail: "原生 app 当前无法调用 OpenClaw 命令。通常是 OpenClaw 未安装，或者当前环境没有包含 ~/.local/bin/openclaw。先确认安装，再重启服务。",
+            rawError: rawError,
+            prefersSettings: true,
+            prefersRestartServices: true
+        )
+    }
+
+    if normalized.contains("invalid json") {
+        return GatewayDiagnosis(
+            headline: "Gateway 返回异常输出",
+            detail: "OpenClaw CLI 已启动，但返回的状态不是有效 JSON。通常是 gateway 进程异常或输出损坏，建议先重启服务再看日志。",
+            rawError: rawError,
+            prefersSettings: false,
+            prefersRestartServices: true
+        )
+    }
+
+    if normalized.contains("timed out") || normalized.contains("econnrefused") || normalized.contains("connect") || normalized.contains("status failed") {
+        return GatewayDiagnosis(
+            headline: "Gateway 没有正常响应",
+            detail: "OpenClaw CLI 已启动，但 gateway 当前没有正常响应。先重启 OpenClaw 服务，再执行一轮巡检更有效。",
+            rawError: rawError,
+            prefersSettings: false,
+            prefersRestartServices: true
+        )
+    }
+
+    return GatewayDiagnosis(
+        headline: "Gateway 当前不可达",
+        detail: "目前还没有拿到稳定的网关响应，建议先重启 OpenClaw 服务，再查看 gateway 日志定位根因。",
+        rawError: rawError,
+        prefersSettings: false,
+        prefersRestartServices: true
+    )
+}
+
 private func primaryRecommendation(summary: SupportSummary?) -> String {
     guard let summary else {
         return "等待诊断数据返回后再生成建议。"
@@ -259,9 +355,171 @@ private func primaryRecommendation(summary: SupportSummary?) -> String {
         return summary.environment.recommendation
     }
     if !summary.gateway.reachable {
-        return present(summary.gateway.error, fallback: "网关当前不可达，建议先重启网关并检查本地状态目录。")
+        return gatewayDiagnosis(summary: summary).detail
     }
     return "当前没有阻塞性的诊断问题，建议继续保持自动切换开启，并定期查看 watchdog 恢复记录。"
+}
+
+private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
+    guard let summary else {
+        return DiagnosticPlan(
+            headline: "等待诊断数据",
+            impact: "原生 daemon 还没有返回完整诊断结果，暂时不适合执行修复动作。",
+            detail: "通常是本地服务刚启动，或者 support summary 还在刷新。",
+            accent: NativePalette.amber,
+            primary: nil,
+            secondary: nil,
+            tertiary: nil
+        )
+    }
+
+    if !summary.gateway.reachable {
+        let issue = gatewayDiagnosis(summary: summary)
+        let primary: DiagnosticActionPlan? = issue.prefersSettings
+            ? DiagnosticActionPlan(
+                title: "检查安装",
+                systemImage: "gearshape",
+                action: .openSettings,
+                prominent: true
+            )
+            : issue.prefersRestartServices
+                ? DiagnosticActionPlan(
+                    title: "重启服务",
+                    systemImage: "arrow.clockwise",
+                    action: .restartServices,
+                    prominent: true
+                )
+                : DiagnosticActionPlan(
+                    title: "一键修复",
+                    systemImage: "wrench.and.screwdriver",
+                    action: .support(.runWatchdogCheck),
+                    prominent: true
+                )
+
+        let secondary: DiagnosticActionPlan? = issue.prefersSettings && issue.prefersRestartServices
+            ? DiagnosticActionPlan(
+                title: "重启服务",
+                systemImage: "arrow.clockwise",
+                action: .restartServices,
+                prominent: false
+            )
+            : DiagnosticActionPlan(
+                title: "打开网关日志",
+                systemImage: "doc.text.magnifyingglass",
+                action: .openGatewayLog,
+                prominent: false
+            )
+
+        let tertiary: DiagnosticActionPlan? = issue.prefersSettings
+            ? DiagnosticActionPlan(
+                title: "打开网关日志",
+                systemImage: "doc.text.magnifyingglass",
+                action: .openGatewayLog,
+                prominent: false
+            )
+            : nil
+
+        return DiagnosticPlan(
+            headline: issue.headline,
+            impact: "OpenClaw gateway 当前不可用，额度探测、推荐切换和 Discord 连通性判断都会一起失真。",
+            detail: issue.detail,
+            accent: NativePalette.rose,
+            primary: primary,
+            secondary: secondary,
+            tertiary: tertiary
+        )
+    }
+
+    if !summary.watchdog.installed {
+        return DiagnosticPlan(
+            headline: "稳定守护未部署",
+            impact: "一旦 Discord 断连或 gateway 卡住，当前机器不会自动恢复。",
+            detail: "现在连通性还正常，但 1.0 的发布态不该缺少 watchdog。建议先部署稳定守护，再继续无人值守运行。",
+            accent: NativePalette.amber,
+            primary: DiagnosticActionPlan(
+                title: "部署守护",
+                systemImage: "shield.badge.plus",
+                action: .support(.reinstallWatchdog),
+                prominent: true
+            ),
+            secondary: DiagnosticActionPlan(
+                title: "打开守护日志",
+                systemImage: "doc.text",
+                action: .openWatchdogLog,
+                prominent: false
+            ),
+            tertiary: nil
+        )
+    }
+
+    if summary.discord.status == "offline" || summary.discord.status == "unstable" {
+        return DiagnosticPlan(
+            headline: summary.discord.status == "offline" ? "Discord 当前离线" : "Discord 长连接不稳定",
+            impact: "自动切换仍可继续，但推荐判断、在线状态和后台恢复的可靠性会明显下降。",
+            detail: summary.discord.recommendation,
+            accent: supportStatusPresentation(summary.discord.status).tint,
+            primary: DiagnosticActionPlan(
+                title: "执行修复",
+                systemImage: "wrench.and.screwdriver",
+                action: .support(.runWatchdogCheck),
+                prominent: true
+            ),
+            secondary: DiagnosticActionPlan(
+                title: "重启网关",
+                systemImage: "arrow.counterclockwise.circle",
+                action: .support(.restartGateway),
+                prominent: false
+            ),
+            tertiary: DiagnosticActionPlan(
+                title: "打开网关日志",
+                systemImage: "doc.text.magnifyingglass",
+                action: .openGatewayLog,
+                prominent: false
+            )
+        )
+    }
+
+    if summary.environment.riskLevel == "high" || summary.environment.riskLevel == "watch" {
+        return DiagnosticPlan(
+            headline: summary.environment.riskLevel == "high" ? "环境风险正在放大断连概率" : "环境存在波动迹象",
+            impact: "代理、VPN 或睡眠恢复会让 Discord 长连接更容易抖动，自动切换会因此更频繁触发诊断。",
+            detail: summary.environment.recommendation,
+            accent: riskPresentation(summary.environment.riskLevel).tint,
+            primary: DiagnosticActionPlan(
+                title: "执行巡检",
+                systemImage: "stethoscope",
+                action: .support(.runWatchdogCheck),
+                prominent: true
+            ),
+            secondary: DiagnosticActionPlan(
+                title: "打开网关日志",
+                systemImage: "doc.text.magnifyingglass",
+                action: .openGatewayLog,
+                prominent: false
+            ),
+            tertiary: nil
+        )
+    }
+
+    return DiagnosticPlan(
+        headline: "诊断稳定",
+        impact: "当前网关、Discord 和稳定守护都处于健康范围，没有阻塞自动切换的故障。",
+        detail: "建议保留随机探测窗口，并继续让 watchdog 在后台守护。",
+        accent: NativePalette.mint,
+        primary: DiagnosticActionPlan(
+            title: "执行巡检",
+            systemImage: "stethoscope",
+            action: .support(.runWatchdogCheck),
+            prominent: true
+        ),
+        secondary: DiagnosticActionPlan(
+            title: "打开网关日志",
+            systemImage: "doc.text.magnifyingglass",
+            action: .openGatewayLog,
+            prominent: false
+        ),
+        tertiary: nil
+    )
 }
 
 private func quotaValue(_ window: UsageWindow?) -> Double {
@@ -1285,13 +1543,15 @@ private struct DiagnosticsSection: View {
             )
 
             if let summary = store.supportSummary {
+                let gatewayIssue = gatewayDiagnosis(summary: summary)
+                let plan = diagnosticPlan(summary: summary)
                 VStack(alignment: .leading, spacing: 14) {
                     InsightTile(
                         title: "网关状态",
                         value: summary.gateway.reachable ? "可达" : "不可达",
                         detail: summary.gateway.reachable
                             ? "连接延迟 \(formatMillis(summary.gateway.connectLatencyMs))"
-                            : present(summary.gateway.error, fallback: "当前无法连接 OpenClaw 网关"),
+                            : gatewayIssue.headline,
                         systemImage: "dot.radiowaves.left.and.right",
                         accent: summary.gateway.reachable ? NativePalette.mint : NativePalette.rose
                     )
@@ -1311,30 +1571,45 @@ private struct DiagnosticsSection: View {
                     )
                 }
 
-                GridCard(title: "建议动作", subtitle: "用户现在最应该知道什么、最应该点哪个按钮", systemImage: "sparkles", accent: diagnosticsPresentation(summary: summary).tint) {
+                GridCard(title: "修复面板", subtitle: "先说根因和影响，再给最合适的动作", systemImage: "sparkles", accent: plan.accent) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(primaryRecommendation(summary: summary))
-                            .foregroundStyle(NativePalette.ink)
-                            .fixedSize(horizontal: false, vertical: true)
+                        diagnosticsSummaryBlock(
+                            label: "当前判断",
+                            value: plan.headline,
+                            detail: plan.detail
+                        )
+
+                        diagnosticsSummaryBlock(
+                            label: "影响范围",
+                            value: plan.impact,
+                            detail: nil
+                        )
+
+                        if let rawError = gatewayIssue.rawError, !summary.gateway.reachable {
+                            diagnosticsSummaryBlock(
+                                label: "原始错误",
+                                value: rawError,
+                                detail: "保留原始报错，方便你判断这是安装问题、gateway 异常，还是环境变量没有生效。"
+                            )
+                        }
 
                         AdaptiveLine(spacing: 10) {
-                            ActionButton("一键修复", systemImage: "wrench.and.screwdriver", busy: store.isBusy("support:\(SupportRepairAction.runWatchdogCheck.rawValue)")) {
-                                store.repair(.runWatchdogCheck)
+                            if let primary = plan.primary {
+                                diagnosticsActionButton(primary)
                             }
-                            ActionButton("重启网关", systemImage: "arrow.counterclockwise.circle", busy: store.isBusy("support:\(SupportRepairAction.restartGateway.rawValue)")) {
-                                store.repair(.restartGateway)
+                            if let secondary = plan.secondary {
+                                diagnosticsActionButton(secondary)
                             }
-                            Button("打开日志") {
-                                store.openGatewayLog()
+                            if let tertiary = plan.tertiary {
+                                diagnosticsActionButton(tertiary)
                             }
-                            .buttonStyle(NativeSecondaryButtonStyle())
                         }
                     }
                 }
 
                 VStack(alignment: .leading, spacing: 18) {
                     GridCard(title: "网关与 Discord", subtitle: "优先判断是否可达、是否稳定、是否该重登", systemImage: "wave.3.right.circle", accent: NativePalette.accent) {
-                        TwoColumnFacts(items: [
+                        let baseItems: [(String, String)] = [
                             ("网关可达", summary.gateway.reachable ? "可达" : "不可达"),
                             ("网关延迟", formatMillis(summary.gateway.connectLatencyMs)),
                             ("网关版本", present(summary.gateway.version)),
@@ -1345,7 +1620,14 @@ private struct DiagnosticsSection: View {
                             ("15 分钟断线", "\(summary.discord.disconnectCount15m)"),
                             ("60 分钟断线", "\(summary.discord.disconnectCount60m)"),
                             ("建议", present(summary.discord.recommendation))
-                        ])
+                        ]
+                        let gatewayItems = summary.gateway.reachable
+                            ? baseItems
+                            : baseItems + [
+                                ("根因判断", gatewayIssue.headline),
+                                ("原始错误", present(gatewayIssue.rawError, fallback: "未提供"))
+                            ]
+                        TwoColumnFacts(items: gatewayItems)
                     }
 
                     GridCard(title: "稳定守护", subtitle: "确认 watchdog 是否在盯着正确目录，以及最近有没有自动恢复", systemImage: "shield", accent: NativePalette.mint) {
@@ -1429,6 +1711,68 @@ private struct DiagnosticsSection: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func diagnosticsActionButton(_ plan: DiagnosticActionPlan) -> some View {
+        switch plan.action {
+        case .openSettings:
+            Button {
+                store.selectedSection = .settings
+            } label: {
+                Label(plan.title, systemImage: plan.systemImage)
+            }
+            .buttonStyle(NativeSecondaryButtonStyle(prominent: plan.prominent))
+        case .restartServices:
+            Button {
+                store.restartServices()
+            } label: {
+                Label(plan.title, systemImage: plan.systemImage)
+            }
+            .buttonStyle(NativeSecondaryButtonStyle(prominent: plan.prominent))
+        case let .support(action):
+            ActionButton(plan.title, systemImage: plan.systemImage, busy: store.isBusy("support:\(action.rawValue)")) {
+                store.repair(action)
+            }
+        case .openGatewayLog:
+            Button {
+                store.openGatewayLog()
+            } label: {
+                Label(plan.title, systemImage: plan.systemImage)
+            }
+            .buttonStyle(NativeSecondaryButtonStyle(prominent: plan.prominent))
+        case .openWatchdogLog:
+            Button {
+                store.openWatchdogLog()
+            } label: {
+                Label(plan.title, systemImage: plan.systemImage)
+            }
+            .buttonStyle(NativeSecondaryButtonStyle(prominent: plan.prominent))
+        }
+    }
+
+    private func diagnosticsSummaryBlock(label: String, value: String, detail: String?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline)
+                .foregroundStyle(NativePalette.ink)
+                .fixedSize(horizontal: false, vertical: true)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(NativePalette.surfaceAlt)
+        )
     }
 }
 
