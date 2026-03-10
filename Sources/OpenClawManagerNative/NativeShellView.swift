@@ -526,6 +526,11 @@ private func quotaValue(_ window: UsageWindow?) -> Double {
     Double(window?.leftPercent ?? 0) / 100
 }
 
+private func appReleaseLabel() -> String {
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    return version.map { "\($0) 正式版" } ?? "正式版"
+}
+
 struct NativeRootView: View {
     @ObservedObject var store: NativeAppStore
 
@@ -594,7 +599,7 @@ struct NativeRootView: View {
                     Text("OpenClaw Manager")
                         .font(.system(size: 21, weight: .bold, design: .rounded))
                         .foregroundStyle(NativePalette.ink)
-                    Text("1.0 正式版")
+                    Text(appReleaseLabel())
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(NativePalette.accent)
                 }
