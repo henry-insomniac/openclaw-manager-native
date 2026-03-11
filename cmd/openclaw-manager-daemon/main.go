@@ -43,6 +43,12 @@ const (
 	refreshSkew                 = 5 * time.Minute
 	usageCacheTTL               = 45 * time.Second
 	staleUsageCacheTTL          = 10 * time.Minute
+	stateDirCacheTTL            = 45 * time.Second
+	supportSummaryCacheTTL      = 10 * time.Second
+	supportGatewayCacheTTL      = 45 * time.Second
+	supportEventsCacheTTL       = 45 * time.Second
+	supportEnvironmentCacheTTL  = 2 * time.Minute
+	supportMaintenanceCacheTTL  = 2 * time.Minute
 	oauthTimeout                = 10 * time.Minute
 	legacyDefaultPollIntervalMs = 60_000
 	minProbeIntervalMs          = 30_000
@@ -97,11 +103,43 @@ type App struct {
 	automationTimer     *time.Timer
 	automationRunning   bool
 	usageCache          map[string]cachedUsageSnapshot
+	stateDirCache       map[string]string
+	stateDirCacheAt     time.Time
+	supportSummaryCache     *cachedSupportSummary
+	supportGatewayCache     *cachedSupportGateway
+	supportEventsCache      *cachedSupportEvents
+	supportEnvironmentCache *cachedSupportEnvironment
+	supportMaintenanceCache *cachedSupportMaintenance
 }
 
 type cachedUsageSnapshot struct {
 	Quota     UsageSnapshot
 	FetchedAt time.Time
+}
+
+type cachedSupportSummary struct {
+	Summary   SupportSummary
+	FetchedAt time.Time
+}
+
+type cachedSupportGateway struct {
+	Gateway   SupportGateway
+	FetchedAt time.Time
+}
+
+type cachedSupportEvents struct {
+	Events    []SupportLogEvent
+	FetchedAt time.Time
+}
+
+type cachedSupportEnvironment struct {
+	Environment SupportEnvironment
+	FetchedAt   time.Time
+}
+
+type cachedSupportMaintenance struct {
+	Maintenance SupportMaintenance
+	FetchedAt   time.Time
 }
 
 type ManagerStateFile struct {
@@ -625,6 +663,7 @@ func newApp() (*App, error) {
 		loginFlows:              map[string]*PendingLoginFlow{},
 		loginFlowIDsByState:     map[string]string{},
 		usageCache:              map[string]cachedUsageSnapshot{},
+		stateDirCache:           map[string]string{},
 	}
 	if app.authOpenMode == "" {
 		app.authOpenMode = "auto"
@@ -792,8 +831,9 @@ func (app *App) handleActivateRecommended(w http.ResponseWriter, _ *http.Request
 	writeJSON(w, http.StatusOK, summary)
 }
 
-func (app *App) handleSupportSummary(w http.ResponseWriter, _ *http.Request) {
-	summary, err := app.buildSupportSummary()
+func (app *App) handleSupportSummary(w http.ResponseWriter, r *http.Request) {
+	fresh := r.URL.Query().Get("fresh") == "1"
+	summary, err := app.buildSupportSummary(fresh)
 	if err != nil {
 		writeAPIMessage(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1707,12 +1747,60 @@ func (app *App) discoverProfileNames(activeProfileName *string) ([]string, error
 	return names, nil
 }
 
+func cloneStringMap(input map[string]string) map[string]string {
+	cloned := make(map[string]string, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func cloneSupportEvents(input []SupportLogEvent) []SupportLogEvent {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make([]SupportLogEvent, len(input))
+	copy(cloned, input)
+	return cloned
+}
+
+func (app *App) invalidateStateDirCache() {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.stateDirCache = map[string]string{}
+	app.stateDirCacheAt = time.Time{}
+}
+
+func (app *App) invalidateSupportCaches() {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	app.supportSummaryCache = nil
+	app.supportGatewayCache = nil
+	app.supportEventsCache = nil
+	app.supportEnvironmentCache = nil
+	app.supportMaintenanceCache = nil
+}
+
 func (app *App) discoverStateDirs() (map[string]string, error) {
+	app.mu.Lock()
+	if len(app.stateDirCache) > 0 && time.Since(app.stateDirCacheAt) <= stateDirCacheTTL {
+		cached := cloneStringMap(app.stateDirCache)
+		app.mu.Unlock()
+		return cached, nil
+	}
+	app.mu.Unlock()
+
 	found := map[string]string{}
 	if pathExists(app.defaultOpenClawState) {
 		found[defaultProfileName] = app.defaultOpenClawState
 	}
 	app.walkForStateDirs(app.openclawHomeDir, 0, found)
+
+	app.mu.Lock()
+	app.stateDirCache = cloneStringMap(found)
+	app.stateDirCacheAt = time.Now()
+	app.mu.Unlock()
+
 	return found, nil
 }
 
@@ -2033,7 +2121,11 @@ func (app *App) ensureProfileScaffold(profileName string) error {
 		}
 	}
 
-	return ensureDir(filepath.Join(stateDir, "agents", "main", "agent"))
+	if err := ensureDir(filepath.Join(stateDir, "agents", "main", "agent")); err != nil {
+		return err
+	}
+	app.invalidateStateDirCache()
+	return nil
 }
 
 func buildMinimalConfig() map[string]any {
@@ -3060,7 +3152,17 @@ func (app *App) expirePendingLoginFlowsLocked() {
 	}
 }
 
-func (app *App) buildSupportSummary() (SupportSummary, error) {
+func (app *App) buildSupportSummary(fresh bool) (SupportSummary, error) {
+	if !fresh {
+		app.mu.Lock()
+		if app.supportSummaryCache != nil && time.Since(app.supportSummaryCache.FetchedAt) <= supportSummaryCacheTTL {
+			cached := app.supportSummaryCache.Summary
+			app.mu.Unlock()
+			return cached, nil
+		}
+		app.mu.Unlock()
+	}
+
 	now := time.Now()
 	var gateway SupportGateway
 	var events []SupportLogEvent
@@ -3073,11 +3175,11 @@ func (app *App) buildSupportSummary() (SupportSummary, error) {
 	wg.Add(5)
 	go func() {
 		defer wg.Done()
-		gateway = app.getOpenClawStatus()
+		gateway = app.getOpenClawStatus(fresh)
 	}()
 	go func() {
 		defer wg.Done()
-		events = app.getRecentEvents()
+		events = app.getRecentEvents(fresh)
 	}()
 	go func() {
 		defer wg.Done()
@@ -3086,11 +3188,11 @@ func (app *App) buildSupportSummary() (SupportSummary, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		environment = app.getEnvironmentSummary(now)
+		environment = app.getEnvironmentSummary(now, fresh)
 	}()
 	go func() {
 		defer wg.Done()
-		maintenance = app.getSupportMaintenance()
+		maintenance = app.getSupportMaintenance(fresh)
 	}()
 	wg.Wait()
 
@@ -3168,7 +3270,7 @@ func (app *App) buildSupportSummary() (SupportSummary, error) {
 		}
 	}
 
-	return SupportSummary{
+	summary := SupportSummary{
 		CollectedAt: now.UTC().Format(time.RFC3339),
 		Gateway:     gateway,
 		Discord: SupportDiscord{
@@ -3193,10 +3295,29 @@ func (app *App) buildSupportSummary() (SupportSummary, error) {
 		},
 		Environment: environment,
 		Maintenance: maintenance,
-	}, nil
+	}
+
+	app.mu.Lock()
+	app.supportSummaryCache = &cachedSupportSummary{
+		Summary:   summary,
+		FetchedAt: time.Now(),
+	}
+	app.mu.Unlock()
+
+	return summary, nil
 }
 
-func (app *App) getSupportMaintenance() SupportMaintenance {
+func (app *App) getSupportMaintenance(fresh bool) SupportMaintenance {
+	if !fresh {
+		app.mu.Lock()
+		if app.supportMaintenanceCache != nil && time.Since(app.supportMaintenanceCache.FetchedAt) <= supportMaintenanceCacheTTL {
+			cached := app.supportMaintenanceCache.Maintenance
+			app.mu.Unlock()
+			return cached
+		}
+		app.mu.Unlock()
+	}
+
 	openclawBin := app.resolveOpenClawBin()
 	var config SupportConfigCheck
 	var gatewayService SupportGatewayService
@@ -3211,7 +3332,7 @@ func (app *App) getSupportMaintenance() SupportMaintenance {
 		gatewayService = app.inspectGatewayService(openclawBin)
 	}()
 	wg.Wait()
-	return SupportMaintenance{
+	maintenance := SupportMaintenance{
 		CLIPath:               nullableString(openclawBin),
 		StateDir:              app.defaultOpenClawState,
 		Config:                config,
@@ -3220,6 +3341,15 @@ func (app *App) getSupportMaintenance() SupportMaintenance {
 		DoctorFixCommand:      "openclaw doctor --fix --yes --non-interactive",
 		GatewayInstallCommand: "openclaw gateway install --force",
 	}
+
+	app.mu.Lock()
+	app.supportMaintenanceCache = &cachedSupportMaintenance{
+		Maintenance: maintenance,
+		FetchedAt:   time.Now(),
+	}
+	app.mu.Unlock()
+
+	return maintenance
 }
 
 func (app *App) inspectOpenClawConfig(openclawBin string) SupportConfigCheck {
@@ -3306,7 +3436,8 @@ func (app *App) performSupportRepair(action string) (SupportRepairResult, error)
 	if err != nil {
 		return SupportRepairResult{}, err
 	}
-	summary, err := app.buildSupportSummary()
+	app.invalidateSupportCaches()
+	summary, err := app.buildSupportSummary(true)
 	if err != nil {
 		return SupportRepairResult{}, err
 	}
@@ -3559,23 +3690,47 @@ func (app *App) restartGateway() CommandResult {
 	return result
 }
 
-func (app *App) getOpenClawStatus() SupportGateway {
+func (app *App) getOpenClawStatus(fresh bool) SupportGateway {
+	if !fresh {
+		app.mu.Lock()
+		if app.supportGatewayCache != nil && time.Since(app.supportGatewayCache.FetchedAt) <= supportGatewayCacheTTL {
+			cached := app.supportGatewayCache.Gateway
+			app.mu.Unlock()
+			return cached
+		}
+		app.mu.Unlock()
+	}
+
 	openclawBin := app.resolveOpenClawBin()
 	result := runCommand(openclawBin, []string{"status", "--json"}, commandTimeout)
 	if !result.OK {
-		return SupportGateway{
+		gateway := SupportGateway{
 			Reachable: false,
 			Error:     cleanOutput(result.Stdout, result.Stderr),
 		}
+		app.mu.Lock()
+		app.supportGatewayCache = &cachedSupportGateway{
+			Gateway:   gateway,
+			FetchedAt: time.Now(),
+		}
+		app.mu.Unlock()
+		return gateway
 	}
 	var payload openclawStatusPayload
 	if err := json.Unmarshal([]byte(result.Stdout), &payload); err != nil {
-		return SupportGateway{
+		gateway := SupportGateway{
 			Reachable: false,
 			Error:     ptr("openclaw status returned invalid json"),
 		}
+		app.mu.Lock()
+		app.supportGatewayCache = &cachedSupportGateway{
+			Gateway:   gateway,
+			FetchedAt: time.Now(),
+		}
+		app.mu.Unlock()
+		return gateway
 	}
-	return SupportGateway{
+	gateway := SupportGateway{
 		Reachable:        payload.Gateway.Reachable,
 		URL:              nullableString(payload.Gateway.URL),
 		ConnectLatencyMs: payload.Gateway.ConnectLatencyMs,
@@ -3583,9 +3738,26 @@ func (app *App) getOpenClawStatus() SupportGateway {
 		Host:             nullableString(payload.Gateway.Self.Host),
 		Error:            nullableString(payload.Gateway.Error),
 	}
+	app.mu.Lock()
+	app.supportGatewayCache = &cachedSupportGateway{
+		Gateway:   gateway,
+		FetchedAt: time.Now(),
+	}
+	app.mu.Unlock()
+	return gateway
 }
 
-func (app *App) getRecentEvents() []SupportLogEvent {
+func (app *App) getRecentEvents(fresh bool) []SupportLogEvent {
+	if !fresh {
+		app.mu.Lock()
+		if app.supportEventsCache != nil && time.Since(app.supportEventsCache.FetchedAt) <= supportEventsCacheTTL {
+			cached := cloneSupportEvents(app.supportEventsCache.Events)
+			app.mu.Unlock()
+			return cached
+		}
+		app.mu.Unlock()
+	}
+
 	events := make([]SupportLogEvent, 0)
 	gatewayText, _ := readTail(app.gatewayLogPath(), logTailBytes)
 	watchdogText, _ := readTail(app.watchdogLogPath(), logTailBytes)
@@ -3639,10 +3811,26 @@ func (app *App) getRecentEvents() []SupportLogEvent {
 	}
 
 	sort.Slice(events, func(i, j int) bool { return events[i].Timestamp > events[j].Timestamp })
+	app.mu.Lock()
+	app.supportEventsCache = &cachedSupportEvents{
+		Events:    cloneSupportEvents(events),
+		FetchedAt: time.Now(),
+	}
+	app.mu.Unlock()
 	return events
 }
 
-func (app *App) getEnvironmentSummary(now time.Time) SupportEnvironment {
+func (app *App) getEnvironmentSummary(now time.Time, fresh bool) SupportEnvironment {
+	if !fresh {
+		app.mu.Lock()
+		if app.supportEnvironmentCache != nil && time.Since(app.supportEnvironmentCache.FetchedAt) <= supportEnvironmentCacheTTL {
+			cached := app.supportEnvironmentCache.Environment
+			app.mu.Unlock()
+			return cached
+		}
+		app.mu.Unlock()
+	}
+
 	var routeResult CommandResult
 	var vpnResult CommandResult
 	var proxyResult CommandResult
@@ -3808,7 +3996,7 @@ func (app *App) getEnvironmentSummary(now time.Time) SupportEnvironment {
 		}
 	}
 
-	return SupportEnvironment{
+	environment := SupportEnvironment{
 		PrimaryInterface:   nullableString(primaryInterface),
 		GatewayAddress:     nullableString(gatewayAddress),
 		VPNLikelyActive:    vpnLikelyActive,
@@ -3822,6 +4010,13 @@ func (app *App) getEnvironmentSummary(now time.Time) SupportEnvironment {
 		RiskySignals:       riskySignals,
 		Recommendation:     recommendation,
 	}
+	app.mu.Lock()
+	app.supportEnvironmentCache = &cachedSupportEnvironment{
+		Environment: environment,
+		FetchedAt:   time.Now(),
+	}
+	app.mu.Unlock()
+	return environment
 }
 
 func (app *App) watchStateDir() string {

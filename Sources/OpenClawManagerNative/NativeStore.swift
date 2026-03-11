@@ -410,8 +410,26 @@ struct NativeNotice: Equatable, Identifiable, Sendable {
     var detail: String?
 }
 
+enum NativeRefreshScope: Sendable {
+    case full
+    case managerOnly
+}
+
+struct NativeRefreshRequest: Sendable {
+    var silent: Bool
+    var scope: NativeRefreshScope
+
+    static func full(silent: Bool = false) -> NativeRefreshRequest {
+        NativeRefreshRequest(silent: silent, scope: .full)
+    }
+
+    static func managerOnly(silent: Bool = true) -> NativeRefreshRequest {
+        NativeRefreshRequest(silent: silent, scope: .managerOnly)
+    }
+}
+
 struct NativeAppActions: Sendable {
-    var refreshAll: @Sendable (Bool) -> Void = { _ in }
+    var refreshAll: @Sendable (NativeRefreshRequest) -> Void = { _ in }
     var pollLoginFlow: @Sendable (String) -> Void = { _ in }
     var createProfile: @Sendable (String) -> Void = { _ in }
     var loginProfile: @Sendable (String) -> Void = { _ in }
@@ -440,7 +458,12 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     @Published var supportSummary: SupportSummary?
     @Published var lastSupportRepairResult: SupportRepairResult?
     @Published var loginFlow: LoginFlowSnapshot?
-    @Published var selectedSection: NativeSection = .overview
+    @Published var selectedSection: NativeSection = .overview {
+        didSet {
+            guard started, oldValue != selectedSection, selectedSection == .diagnostics else { return }
+            actions.refreshAll(.full(silent: true))
+        }
+    }
     @Published var selectedProfileName: String?
     @Published var busyKeys: Set<String> = []
     @Published var notice: NativeNotice?
@@ -496,7 +519,6 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     func start() {
         guard !started else { return }
         started = true
-        actions.refreshAll(false)
         scheduleRefreshTimer()
     }
 
@@ -511,7 +533,11 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     func scheduleRefreshTimer() {
         refreshTimer?.invalidate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.actions.refreshAll(true)
+            guard let self else { return }
+            let request: NativeRefreshRequest = self.selectedSection == .diagnostics
+                ? .full(silent: true)
+                : .managerOnly(silent: true)
+            self.actions.refreshAll(request)
         }
     }
 
@@ -551,7 +577,7 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     func applyLoginFlow(_ flow: LoginFlowSnapshot) {
         loginFlow = flow
         if flow.status != .pending {
-            actions.refreshAll(true)
+            actions.refreshAll(.full(silent: true))
         }
         restartLoginFlowTimerIfNeeded()
     }
@@ -614,8 +640,8 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         actions.createProfile(name)
     }
 
-    func refreshAll(silent: Bool = false) {
-        actions.refreshAll(silent)
+    func refreshAll(silent: Bool = false, scope: NativeRefreshScope = .full) {
+        actions.refreshAll(NativeRefreshRequest(silent: silent, scope: scope))
     }
 
     func login(profileName: String) {

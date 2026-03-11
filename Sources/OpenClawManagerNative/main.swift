@@ -18,6 +18,7 @@ private enum RuntimeRootTarget: Sendable {
 
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @unchecked Sendable {
     private let appName = "OpenClaw Manager Native"
+    private let automaticTerminationReason = "OpenClaw Manager Native keeps local OpenClaw services available"
     private let apiPreferredPort: UInt16 = 3311
     private let callbackPreferredPort: UInt16 = 1455
 
@@ -32,7 +33,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private var currentApiPort: UInt16?
     private var currentCallbackPort: UInt16?
     private var statusItem: NSStatusItem?
-    private var statusItemRefreshTimer: Timer?
     private var latestManagerSummary: ManagerSummary?
     private var latestSupportSummary: SupportSummary?
     private var lastMenuBarError: String?
@@ -44,17 +44,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.disableSuddenTermination()
+        ProcessInfo.processInfo.disableAutomaticTermination(automaticTerminationReason)
         NSApp.setActivationPolicy(.regular)
         configureStoreActions()
         configureStatusItem()
 
         do {
             try initializeEnvironment()
+            appendLifecycleLog("application did finish launching")
             pushLocalSnapshotToStore()
             rebuildMenu()
             try restartRuntime(reason: "startup")
             ensureWindow()
-            startStatusItemRefreshLoop()
             refreshManagerData()
             store.start()
             NSApp.activate(ignoringOtherApps: true)
@@ -69,15 +71,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
     @MainActor
     func applicationWillTerminate(_ notification: Notification) {
-        stopStatusItemRefreshLoop()
+        appendLifecycleLog("application will terminate")
         store.stop()
         terminateProcesses()
+        ProcessInfo.processInfo.enableAutomaticTermination(automaticTerminationReason)
+        ProcessInfo.processInfo.enableSuddenTermination()
     }
 
     @MainActor
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         presentMainWindow()
         return true
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
+        true
     }
 
     @MainActor
@@ -88,9 +96,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
     private func configureStoreActions() {
         store.configure(actions: NativeAppActions(
-            refreshAll: { [weak self] silent in
+            refreshAll: { [weak self] request in
                 Task { @MainActor [weak self] in
-                    self?.refreshManagerData(showErrorAlerts: false, silentForStore: silent)
+                    self?.refreshManagerData(scope: request.scope, showErrorAlerts: false, silentForStore: request.silent)
                 }
             },
             pollLoginFlow: { [weak self] flowId in
@@ -222,6 +230,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return target
     }
 
+    private func lifecycleLogURL() -> URL? {
+        appSupportURL?.appendingPathComponent("native.log")
+    }
+
+    private func appendLifecycleLog(_ message: String) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(message)\n"
+        FileHandle.standardError.write(Data("[native] \(line)".utf8))
+
+        guard let logURL = lifecycleLogURL() else { return }
+        let data = Data(line.utf8)
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: logURL.path) {
+            try? data.write(to: logURL, options: .atomic)
+            return
+        }
+
+        guard let handle = try? FileHandle(forWritingTo: logURL) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+
     @MainActor
     private func loadOrCreateSettings() throws -> RuntimeConfig {
         guard let settingsURL else {
@@ -319,32 +349,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
 
         rebuildStatusItemMenu()
-    }
-
-    @MainActor
-    private func startStatusItemRefreshLoop() {
-        stopStatusItemRefreshLoop()
-        statusItemRefreshTimer = Timer.scheduledTimer(
-            timeInterval: 20,
-            target: self,
-            selector: #selector(handleStatusItemRefreshTimer(_:)),
-            userInfo: nil,
-            repeats: true
-        )
-        if let statusItemRefreshTimer {
-            RunLoop.main.add(statusItemRefreshTimer, forMode: .common)
-        }
-    }
-
-    @MainActor
-    @objc private func handleStatusItemRefreshTimer(_ timer: Timer) {
-        refreshManagerData()
-    }
-
-    @MainActor
-    private func stopStatusItemRefreshLoop() {
-        statusItemRefreshTimer?.invalidate()
-        statusItemRefreshTimer = nil
     }
 
     private func menuBarButtonTitle() -> String {
@@ -514,7 +518,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
-    private func refreshManagerData(showErrorAlerts: Bool = false, silentForStore: Bool = true) {
+    private func refreshManagerData(
+        scope: NativeRefreshScope = .full,
+        showErrorAlerts: Bool = false,
+        silentForStore: Bool = true
+    ) {
         guard currentApiPort != nil else {
             latestManagerSummary = nil
             latestSupportSummary = nil
@@ -532,6 +540,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             do {
                 let summaryBox = RequestResultBox<ManagerSummary>()
                 let supportBox = RequestResultBox<SupportSummary>()
+                let includeSupport = scope == .full
+                let supportPath = !silentForStore ? "/api/support/summary?fresh=1" : "/api/support/summary"
                 let group = DispatchGroup()
 
                 group.enter()
@@ -546,15 +556,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                     }
                 }
 
-                group.enter()
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    defer { group.leave() }
-                    guard let self else { return }
-                    do {
-                        let supportSummary: SupportSummary = try self.performManagerRequest(path: "/api/support/summary")
-                        supportBox.value = .success(supportSummary)
-                    } catch {
-                        supportBox.value = .failure(error)
+                if includeSupport {
+                    group.enter()
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        defer { group.leave() }
+                        guard let self else { return }
+                        do {
+                            let supportSummary: SupportSummary = try self.performManagerRequest(path: supportPath)
+                            supportBox.value = .success(supportSummary)
+                        } catch {
+                            supportBox.value = .failure(error)
+                        }
                     }
                 }
 
@@ -565,7 +577,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                 }
 
                 let summary = try summaryResult.get()
-                let supportSummary = try? supportBox.value?.get()
+                let supportSummary = includeSupport ? (try? supportBox.value?.get()) : self.latestSupportSummary
                 Task { @MainActor [weak self] in
                     self?.applyRefreshedState(summary: summary, supportSummary: supportSummary)
                 }
@@ -1388,11 +1400,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        let outputGroup = DispatchGroup()
+        let outputQueue = DispatchQueue.global(qos: .utility)
+        let stdoutBox = RequestResultBox<Data>()
+        let stderrBox = RequestResultBox<Data>()
+
+        outputGroup.enter()
+        outputQueue.async {
+            stdoutBox.value = .success(stdoutPipe.fileHandleForReading.readDataToEndOfFile())
+            outputGroup.leave()
+        }
+
+        outputGroup.enter()
+        outputQueue.async {
+            stderrBox.value = .success(stderrPipe.fileHandleForReading.readDataToEndOfFile())
+            outputGroup.leave()
+        }
+
         try process.run()
         process.waitUntilExit()
+        outputGroup.wait()
 
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let stdoutData = (try? stdoutBox.value?.get()) ?? Data()
+        let stderrData = (try? stderrBox.value?.get()) ?? Data()
 
         return ShellCommandResult(
             status: process.terminationStatus,
@@ -1488,15 +1518,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         isRestarting = true
         defer { isRestarting = false }
 
+        appendLifecycleLog("restart runtime begin reason=\(reason)")
         terminateProcesses()
+        appendLifecycleLog("restart runtime after terminate tracked processes")
+        terminateStaleBundledBackends()
+        appendLifecycleLog("restart runtime after terminate stale bundled backends")
 
         let apiPort = try findFreePort(preferred: apiPreferredPort)
         let callbackPort = try findFreePort(preferred: callbackPreferredPort)
+        appendLifecycleLog("restart runtime reserved ports api=\(apiPort) callback=\(callbackPort)")
 
         let daemonURL = runtimeRootURL.appendingPathComponent("openclaw-manager-daemon")
         let stateURL = appSupportURL!.appendingPathComponent("manager-state", isDirectory: true)
 
         try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true)
+        appendLifecycleLog("restart runtime prepared state directory path=\(stateURL.path)")
 
         var environment: [String: String] = [
             "OPENCLAW_MANAGER_RUNTIME_MODE": "native",
@@ -1516,6 +1552,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             environment["OPENCLAW_BIN"] = openclawBin
         }
 
+        appendLifecycleLog("restart runtime launching daemon path=\(daemonURL.path)")
         backendProcess = try launchProcess(
             executableURL: daemonURL,
             arguments: [],
@@ -1523,7 +1560,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             currentDirectoryURL: stateURL,
             logPrefix: "manager-api"
         )
+        appendLifecycleLog("restart runtime launched daemon pid=\(backendProcess?.processIdentifier ?? 0)")
 
+        appendLifecycleLog("restart runtime waiting for health api=\(apiPort)")
         try waitUntilReachable(url: URL(string: "http://127.0.0.1:\(apiPort)/api/health")!, expectedStatus: 200, timeout: 30)
 
         currentApiPort = apiPort
@@ -1531,6 +1570,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         pushLocalSnapshotToStore()
         rebuildMenu()
 
+        appendLifecycleLog("runtime ready reason=\(reason) api=\(apiPort) callback=\(callbackPort)")
         print("[native] runtime ready (\(reason)) api=\(apiPort) callback=\(callbackPort)")
     }
 
@@ -1614,6 +1654,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             let code = terminated.terminationStatus
             let reason = terminated.terminationReason == .exit ? "exit" : "uncaught signal"
             FileHandle.standardError.write(Data("[\(logPrefix)] terminated status=\(code) reason=\(reason)\n".utf8))
+            self.appendLifecycleLog("\(logPrefix) terminated status=\(code) reason=\(reason)")
         }
 
         try process.run()
@@ -1642,6 +1683,71 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             }
         }
         process = nil
+    }
+
+    private func terminateStaleBundledBackends() {
+        let stalePIDs = discoverStaleBundledBackendPIDs()
+        guard !stalePIDs.isEmpty else { return }
+        appendLifecycleLog("terminating stale bundled backends count=\(stalePIDs.count)")
+        for pid in stalePIDs {
+            terminateExternalProcess(pid)
+        }
+    }
+
+    private func discoverStaleBundledBackendPIDs() -> [pid_t] {
+        let psURL = URL(fileURLWithPath: "/bin/ps")
+        guard let result = try? runCommand(executableURL: psURL, arguments: ["-axo", "pid=,command="]),
+              result.status == 0 else {
+            return []
+        }
+
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let trackedBackendPID = backendProcess?.processIdentifier
+        let bundledRuntimeMarker = "OpenClaw Manager Native.app/Contents/Resources/runtime/"
+        var matches: [pid_t] = []
+
+        for line in result.stdout.split(whereSeparator: \.isNewline) {
+            let text = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { continue }
+
+            let parts = text.split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            guard parts.count == 2, let pidValue = Int32(parts[0]) else { continue }
+            guard pidValue != currentPID, pidValue != trackedBackendPID else { continue }
+
+            let command = String(parts[1])
+            guard command.contains(bundledRuntimeMarker) else { continue }
+
+            let isBundledDaemon = command.contains("/openclaw-manager-daemon")
+            let isLegacyNodeAPI = command.contains("/node_modules/node/bin/node") && command.contains("/apps/api/dist/server.js")
+            guard isBundledDaemon || isLegacyNodeAPI else { continue }
+
+            matches.append(pidValue)
+        }
+
+        return matches
+    }
+
+    private func terminateExternalProcess(_ pid: pid_t) {
+        guard pid > 0 else { return }
+        if kill(pid, SIGTERM) != 0 && errno == ESRCH {
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(3)
+        while processExists(pid), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
+        if processExists(pid) {
+            _ = kill(pid, SIGKILL)
+        }
+    }
+
+    private func processExists(_ pid: pid_t) -> Bool {
+        if kill(pid, 0) == 0 {
+            return true
+        }
+        return errno == EPERM
     }
 
     private func waitUntilReachable(url: URL, expectedStatus: Int, timeout: TimeInterval) throws {
@@ -1752,6 +1858,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     @MainActor
     private func showFatalError(_ error: Error) {
         requireMainThread()
+        appendLifecycleLog("fatal error: \(error.localizedDescription)")
         showInfo(message: "桌面版启动失败", detail: error.localizedDescription)
         NSApp.terminate(nil)
     }
