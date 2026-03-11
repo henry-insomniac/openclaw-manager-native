@@ -132,6 +132,10 @@ struct ManagedProfileSnapshot: Decodable, Equatable, Identifiable, Sendable {
     var profileId: String?
     var accountEmail: String?
     var accountId: String?
+    var primaryProviderId: String?
+    var primaryModelId: String?
+    var configuredProviderIds: [String]
+    var supportsQuota: Bool
     var codexHome: String
     var codexConfigPath: String
     var codexAuthPath: String

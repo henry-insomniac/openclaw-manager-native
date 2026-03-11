@@ -171,6 +171,26 @@ private func shortAccountId(_ value: String?) -> String {
     return "\(value.prefix(6))...\(value.suffix(4))"
 }
 
+private func providerLabel(_ providerId: String?) -> String {
+    guard let providerId, !providerId.isEmpty else { return "未配置" }
+    switch providerId {
+    case "openai-codex":
+        return "Codex"
+    case "openai":
+        return "OpenAI"
+    case "anthropic":
+        return "Anthropic"
+    case "openrouter":
+        return "OpenRouter"
+    case "ollama":
+        return "Ollama"
+    case "gemini", "google":
+        return "Gemini"
+    default:
+        return providerId
+    }
+}
+
 private func present(_ value: String?, fallback: String = "未提供") -> String {
     guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return fallback
@@ -182,33 +202,33 @@ private func sectionNarrative(for section: NativeSection) -> SectionNarrative {
     switch section {
     case .overview:
         return SectionNarrative(
-            eyebrow: "NATIVE COMMAND CENTER",
-            title: "把切换速度、daemon 状态和稳定性收在一屏",
-            detail: "这不是调试页，而是 1.0 的主工作台。当前账号、推荐切换、随机探测和守护结果都应该在这里一眼看懂。"
+            eyebrow: "OVERVIEW",
+            title: "当前状态",
+            detail: "看当前账号、推荐切换和守护状态。"
         )
     case .profiles:
         return SectionNarrative(
-            eyebrow: "ACCOUNT POOL",
-            title: "账号池应该像运营面板，而不是一串 profile 名称",
-            detail: "登录、探测、额度余量和当前激活关系放在同一层，让用户能直接判断什么时候切、切到谁。"
+            eyebrow: "PROFILES",
+            title: "查看和切换 profile",
+            detail: "登录、探测和激活都放在这里。"
         )
     case .settings:
         return SectionNarrative(
-            eyebrow: "VISUAL SETTINGS",
-            title: "目录、策略和自动切换阈值集中管理",
-            detail: "把根目录和随机探测策略放进同一个可视化页面，避免用户在配置文件、命令行和原生壳之间来回跳。"
+            eyebrow: "SETTINGS",
+            title: "目录和自动化",
+            detail: "改根目录、探测窗口和切换阈值。"
         )
     case .diagnostics:
         return SectionNarrative(
             eyebrow: "DIAGNOSTICS",
-            title: "守护、网关和环境风险必须直观到不需要解释",
-            detail: "出现离线、断连或环境风险时，用户应当直接知道哪里坏了、影响多大、下一步该点什么。"
+            title: "排查问题",
+            detail: "看状态、原因和修复动作。"
         )
     case .deployment:
         return SectionNarrative(
-            eyebrow: "DEPLOYMENT",
-            title: "原生、Web 和分发资产的边界要说清楚",
-            detail: "这里应该回答三件事：怎么接入、兼容到哪里、交付给别人时需要带走哪些文件。"
+            eyebrow: "ACCESS",
+            title: "命令和目录",
+            detail: "这里只看命令和路径。"
         )
     }
 }
@@ -242,9 +262,31 @@ private func diagnosticsPresentation(summary: SupportSummary?) -> StatusPresenta
 }
 
 private func profileCapabilitySummary(_ profile: ManagedProfileSnapshot) -> String {
-    let openclaw = profile.hasAuthStore ? "OpenClaw 已登录" : "OpenClaw 未登录"
-    let codex = profile.hasCodexAuth ? "Codex 已就绪" : "Codex 未登录"
-    return "\(openclaw) · \(codex)"
+    let provider = providerLabel(profile.primaryProviderId)
+    let quota = profile.supportsQuota ? "支持额度探测" : "不探测额度"
+    return "主 provider: \(provider) · \(quota)"
+}
+
+private func profileFactItems(_ profile: ManagedProfileSnapshot) -> [(String, String)] {
+    var items: [(String, String)] = [
+        ("主 provider", providerLabel(profile.primaryProviderId)),
+        ("主模型", present(profile.primaryModelId)),
+        ("配置 provider", profile.configuredProviderIds.isEmpty ? "未提供" : profile.configuredProviderIds.joined(separator: " · ")),
+        ("令牌剩余", formatDuration(ms: profile.tokenExpiresInMs)),
+        ("账号 ID", shortAccountId(profile.accountId)),
+        ("状态目录", profile.stateDir)
+    ]
+
+    if profile.supportsQuota {
+        items.insert(("套餐", present(profile.quota.plan)), at: 3)
+    }
+
+    if profile.codexAccountId != nil || profile.hasCodexAuth {
+        items.append(("Codex 账号", shortAccountId(profile.codexAccountId)))
+        items.append(("最近刷新", formatDate(profile.codexLastRefreshAt)))
+    }
+
+    return items
 }
 
 private struct GatewayDiagnosis {
@@ -284,7 +326,7 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
     guard let summary else {
         return GatewayDiagnosis(
             headline: "等待网关诊断",
-            detail: "原生 daemon 还没有返回网关状态，通常是刚启动或仍在刷新。",
+            detail: "daemon 还没返回网关状态。",
             rawError: nil,
             prefersSettings: false,
             prefersRestartServices: false
@@ -307,7 +349,7 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
     if normalized.contains("enoent") && normalized.contains("openclaw") {
         return GatewayDiagnosis(
             headline: "未找到 OpenClaw CLI",
-            detail: "原生 app 当前无法调用 OpenClaw 命令。通常是 OpenClaw 未安装，或者当前环境没有包含 ~/.local/bin/openclaw。先确认安装，再重启服务。",
+            detail: "原生 app 当前无法调用 OpenClaw 命令。先确认已安装，并保证环境包含 ~/.local/bin/openclaw。",
             rawError: rawError,
             prefersSettings: true,
             prefersRestartServices: true
@@ -317,7 +359,7 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
     if normalized.contains("invalid json") {
         return GatewayDiagnosis(
             headline: "Gateway 返回异常输出",
-            detail: "OpenClaw CLI 已启动，但返回的状态不是有效 JSON。通常是 gateway 进程异常或输出损坏，建议先重启服务再看日志。",
+            detail: "gateway 返回的状态不是有效 JSON。先重启服务，再看日志。",
             rawError: rawError,
             prefersSettings: false,
             prefersRestartServices: true
@@ -327,7 +369,7 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
     if normalized.contains("timed out") || normalized.contains("econnrefused") || normalized.contains("connect") || normalized.contains("status failed") {
         return GatewayDiagnosis(
             headline: "Gateway 没有正常响应",
-            detail: "OpenClaw CLI 已启动，但 gateway 当前没有正常响应。先重启 OpenClaw 服务，再执行一轮巡检更有效。",
+            detail: "gateway 当前没有正常响应。先重启 OpenClaw 服务。",
             rawError: rawError,
             prefersSettings: false,
             prefersRestartServices: true
@@ -336,7 +378,7 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
 
     return GatewayDiagnosis(
         headline: "Gateway 当前不可达",
-        detail: "目前还没有拿到稳定的网关响应，建议先重启 OpenClaw 服务，再查看 gateway 日志定位根因。",
+        detail: "当前拿不到稳定的网关响应。先重启 OpenClaw 服务，再看日志。",
         rawError: rawError,
         prefersSettings: false,
         prefersRestartServices: true
@@ -345,7 +387,7 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
 
 private func primaryRecommendation(summary: SupportSummary?) -> String {
     guard let summary else {
-        return "等待诊断数据返回后再生成建议。"
+        return "等待诊断数据。"
     }
 
     if summary.discord.status == "offline" {
@@ -357,15 +399,15 @@ private func primaryRecommendation(summary: SupportSummary?) -> String {
     if !summary.gateway.reachable {
         return gatewayDiagnosis(summary: summary).detail
     }
-    return "当前没有阻塞性的诊断问题，建议继续保持自动切换开启，并定期查看 watchdog 恢复记录。"
+    return "当前没有明显故障。保持自动切换和 watchdog 即可。"
 }
 
 private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
     guard let summary else {
         return DiagnosticPlan(
             headline: "等待诊断数据",
-            impact: "原生 daemon 还没有返回完整诊断结果，暂时不适合执行修复动作。",
-            detail: "通常是本地服务刚启动，或者 support summary 还在刷新。",
+            impact: "daemon 还没返回完整诊断结果。",
+            detail: "本地服务可能刚启动。",
             accent: NativePalette.amber,
             primary: nil,
             secondary: nil,
@@ -434,7 +476,7 @@ private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
         return DiagnosticPlan(
             headline: "稳定守护未部署",
             impact: "一旦 Discord 断连或 gateway 卡住，当前机器不会自动恢复。",
-            detail: "现在连通性还正常，但 1.0 的发布态不该缺少 watchdog。建议先部署稳定守护，再继续无人值守运行。",
+            detail: "未启用 watchdog。先部署，再跑无人值守。",
             accent: NativePalette.amber,
             primary: DiagnosticActionPlan(
                 title: "部署守护",
@@ -504,7 +546,7 @@ private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
     return DiagnosticPlan(
         headline: "诊断稳定",
         impact: "当前网关、Discord 和稳定守护都处于健康范围，没有阻塞自动切换的故障。",
-        detail: "建议保留随机探测窗口，并继续让 watchdog 在后台守护。",
+        detail: "保留随机探测窗口，让 watchdog 持续运行。",
         accent: NativePalette.mint,
         primary: DiagnosticActionPlan(
             title: "执行巡检",
@@ -528,18 +570,18 @@ private func quotaValue(_ window: UsageWindow?) -> Double {
 
 private func appReleaseLabel() -> String {
     let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-    return version.map { "\($0) 正式版" } ?? "正式版"
+    return version.map { "v\($0)" } ?? "本地构建"
 }
 
 struct NativeRootView: View {
     @ObservedObject var store: NativeAppStore
 
     private let sections: [SectionDescriptor] = [
-        SectionDescriptor(section: .overview, title: "控制台", caption: "速度、daemon、稳定性总览", symbol: "rectangle.grid.2x2"),
-        SectionDescriptor(section: .profiles, title: "账号池", caption: "OpenClaw / Codex 切换面板", symbol: "person.3"),
-        SectionDescriptor(section: .settings, title: "可视化设置", caption: "目录、策略与自动化阈值", symbol: "slider.horizontal.3"),
-        SectionDescriptor(section: .diagnostics, title: "诊断中心", caption: "守护、网关、环境风险", symbol: "stethoscope"),
-        SectionDescriptor(section: .deployment, title: "部署与接入", caption: "兼容边界与分发资产", symbol: "shippingbox")
+        SectionDescriptor(section: .overview, title: "总览", caption: "当前状态", symbol: "rectangle.grid.2x2"),
+        SectionDescriptor(section: .profiles, title: "账号池", caption: "切换和登录", symbol: "person.3"),
+        SectionDescriptor(section: .settings, title: "设置", caption: "目录和自动化", symbol: "slider.horizontal.3"),
+        SectionDescriptor(section: .diagnostics, title: "诊断", caption: "网关、守护、环境", symbol: "stethoscope"),
+        SectionDescriptor(section: .deployment, title: "命令", caption: "命令和目录", symbol: "shippingbox")
     ]
 
     var body: some View {
@@ -604,10 +646,6 @@ struct NativeRootView: View {
                         .foregroundStyle(NativePalette.accent)
                 }
             }
-
-            Text("快速稳定地切换 `.openclaw` / `codex` 账号，把原生守护、诊断与交付压缩进同一套 mac 工作台。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             HStack(spacing: 8) {
                 TonePill(text: runtimeModeLabel(store.runtime?.mode), tint: NativePalette.accent)
@@ -720,6 +758,25 @@ struct NativeRootView: View {
             )
             .ignoresSafeArea()
 
+            VStack(spacing: 0) {
+                LinearGradient(
+                    colors: [Color(red: 0.12, green: 0.13, blue: 0.15), NativePalette.canvasTop],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 118)
+                .overlay(
+                    Rectangle()
+                        .fill(Color.white.opacity(0.04))
+                        .frame(height: 1),
+                    alignment: .bottom
+                )
+
+                Spacer(minLength: 0)
+            }
+            .ignoresSafeArea(edges: .top)
+            .allowsHitTesting(false)
+
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 24) {
                     NativeHeaderView(store: store)
@@ -764,71 +821,49 @@ struct NativeRootView: View {
 private struct NativeHeaderView: View {
     @ObservedObject var store: NativeAppStore
 
-    private let metricColumns = [GridItem(.adaptive(minimum: 220), spacing: 14, alignment: .top)]
-
     var body: some View {
         let runtime = store.runtime
         let support = store.supportSummary
         let narrative = sectionNarrative(for: store.selectedSection)
 
         VStack(alignment: .leading, spacing: 18) {
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 30, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(red: 0.12, green: 0.16, blue: 0.25), Color(red: 0.08, green: 0.10, blue: 0.14)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-
+            VStack(alignment: .leading, spacing: 18) {
                 ViewThatFits(in: .horizontal) {
                     heroLayout(horizontal: true, runtime: runtime, support: support, narrative: narrative)
                     heroLayout(horizontal: false, runtime: runtime, support: support, narrative: narrative)
                 }
-                .padding(28)
-            }
 
-            LazyVGrid(columns: metricColumns, spacing: 14) {
-                MetricTile(
-                    title: "当前账号",
-                    value: store.activeProfile?.name ?? "未激活",
-                    caption: present(store.activeProfile?.accountEmail, fallback: "当前没有接管任何账号"),
-                    accent: NativePalette.accent
-                )
-                MetricTile(
-                    title: "推荐账号",
-                    value: store.recommendedProfile?.name ?? "暂无推荐",
-                    caption: present(store.recommendedProfile?.accountEmail, fallback: "当前没有更优切换目标"),
-                    accent: NativePalette.mint
-                )
-                MetricTile(
-                    title: "最近切换耗时",
-                    value: formatMillis(runtime?.switching.lastActivationDurationMs),
-                    caption: "平均 \(formatMillis(runtime?.switching.averageActivationDurationMs))",
-                    accent: NativePalette.amber
-                )
-                MetricTile(
-                    title: "守护状态",
-                    value: runtime?.daemon.loopRunning == true ? "巡检中" : runtime?.daemon.loopScheduled == true ? "已驻留" : "等待启动",
-                    caption: store.localSnapshot.watchdog.statusLine,
-                    accent: support?.watchdog.installed == true ? NativePalette.mint : NativePalette.amber
-                )
+                heroStats(runtime: runtime, support: support)
             }
+            .padding(24)
+            .background(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.10, green: 0.14, blue: 0.23), Color(red: 0.07, green: 0.09, blue: 0.13)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .stroke(NativePalette.borderStrong, lineWidth: 1)
+            )
         }
     }
 
     @ViewBuilder
     private func heroLayout(horizontal: Bool, runtime: RuntimeOverview?, support: SupportSummary?, narrative: SectionNarrative) -> some View {
         if horizontal {
-            HStack(alignment: .top, spacing: 24) {
+            HStack(alignment: .top, spacing: 20) {
                 heroCopy(runtime: runtime, support: support, narrative: narrative)
                 Spacer(minLength: 0)
                 heroMeta(runtime: runtime)
-                    .frame(width: 290)
+                    .frame(width: 320)
             }
         } else {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 18) {
                 heroCopy(runtime: runtime, support: support, narrative: narrative)
                 heroMeta(runtime: runtime)
             }
@@ -843,12 +878,12 @@ private struct NativeHeaderView: View {
                 .foregroundStyle(Color.white.opacity(0.76))
 
             Text(narrative.title)
-                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .font(.system(size: 30, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text(narrative.detail)
-                .font(.body)
+                .font(.system(size: 15, weight: .regular))
                 .foregroundStyle(Color.white.opacity(0.86))
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -869,7 +904,7 @@ private struct NativeHeaderView: View {
                     store.selectedSection = .profiles
                 }
                 .buttonStyle(NativeSecondaryButtonStyle())
-                Button("诊断中心") {
+                Button("诊断") {
                     store.selectedSection = .diagnostics
                 }
                 .buttonStyle(NativeSecondaryButtonStyle())
@@ -879,9 +914,77 @@ private struct NativeHeaderView: View {
 
     private func heroMeta(runtime: RuntimeOverview?) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HeroInfoTile(title: "API 地址", value: present(runtime?.daemon.apiBaseUrl, fallback: "等待本地 API"), caption: "原生壳只连本地 daemon")
-            HeroInfoTile(title: "OAuth 回调", value: present(store.localSnapshot.callbackURL ?? runtime?.roots.oauthCallbackUrl), caption: "浏览器回调结束后自动回收")
-            HeroInfoTile(title: "最新切换", value: formatDate(runtime?.switching.lastActivationAt), caption: present(runtime?.switching.lastActivationReason, fallback: "还没有切换记录"))
+            CompactMetaRow(label: "API 地址", value: present(runtime?.daemon.apiBaseUrl, fallback: "等待本地 API"))
+            CompactMetaRow(label: "回调地址", value: present(store.localSnapshot.callbackURL ?? runtime?.roots.oauthCallbackUrl))
+            CompactMetaRow(label: "最新切换", value: formatDate(runtime?.switching.lastActivationAt), detail: present(runtime?.switching.lastActivationReason, fallback: "还没有切换记录"))
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    @ViewBuilder
+    private func heroStats(runtime: RuntimeOverview?, support: SupportSummary?) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                CompactMetricCell(
+                    title: "当前账号",
+                    value: store.activeProfile?.name ?? "未激活",
+                    caption: present(store.activeProfile?.accountEmail, fallback: "当前没有接管任何账号"),
+                    accent: NativePalette.accent
+                )
+                CompactMetricCell(
+                    title: "推荐账号",
+                    value: store.recommendedProfile?.name ?? "暂无推荐",
+                    caption: present(store.recommendedProfile?.accountEmail, fallback: "当前没有更优切换目标"),
+                    accent: NativePalette.mint
+                )
+                CompactMetricCell(
+                    title: "切换耗时",
+                    value: formatMillis(runtime?.switching.lastActivationDurationMs),
+                    caption: "平均 \(formatMillis(runtime?.switching.averageActivationDurationMs))",
+                    accent: NativePalette.amber
+                )
+                CompactMetricCell(
+                    title: "守护状态",
+                    value: runtime?.daemon.loopRunning == true ? "巡检中" : runtime?.daemon.loopScheduled == true ? "已驻留" : "等待启动",
+                    caption: store.localSnapshot.watchdog.statusLine,
+                    accent: support?.watchdog.installed == true ? NativePalette.mint : NativePalette.amber
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                CompactMetricCell(
+                    title: "当前账号",
+                    value: store.activeProfile?.name ?? "未激活",
+                    caption: present(store.activeProfile?.accountEmail, fallback: "当前没有接管任何账号"),
+                    accent: NativePalette.accent
+                )
+                CompactMetricCell(
+                    title: "推荐账号",
+                    value: store.recommendedProfile?.name ?? "暂无推荐",
+                    caption: present(store.recommendedProfile?.accountEmail, fallback: "当前没有更优切换目标"),
+                    accent: NativePalette.mint
+                )
+                CompactMetricCell(
+                    title: "切换耗时",
+                    value: formatMillis(runtime?.switching.lastActivationDurationMs),
+                    caption: "平均 \(formatMillis(runtime?.switching.averageActivationDurationMs))",
+                    accent: NativePalette.amber
+                )
+                CompactMetricCell(
+                    title: "守护状态",
+                    value: runtime?.daemon.loopRunning == true ? "巡检中" : runtime?.daemon.loopScheduled == true ? "已驻留" : "等待启动",
+                    caption: store.localSnapshot.watchdog.statusLine,
+                    accent: support?.watchdog.installed == true ? NativePalette.mint : NativePalette.amber
+                )
+            }
         }
     }
 }
@@ -892,112 +995,92 @@ private struct OverviewSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SectionLead(
-                title: "控制台总览",
-                detail: "给用户看的第一屏不能像开发面板。这里优先呈现动作、结果和风险，而不是原始字段。"
+                title: "总览",
+                detail: "先看状态，再决定动作。"
             )
 
-            VStack(alignment: .leading, spacing: 14) {
-                let readiness = readinessPresentation(runtime: store.runtime)
-                InsightTile(
-                    title: "切换准备度",
-                    value: readiness.label,
-                    detail: store.runtime.map { "健康账号 \($0.switching.healthyProfiles) / 总数 \($0.switching.totalProfiles)" } ?? "等待 runtime 返回账号池状态",
-                    systemImage: "bolt.badge.checkmark",
-                    accent: readiness.tint
-                )
-                InsightTile(
-                    title: "自动巡检",
-                    value: store.automation?.enabled == true ? "已开启" : "已暂停",
-                    detail: store.automation.map { "随机窗口 \(formatProbeWindow(minMs: $0.probeIntervalMinMs, maxMs: $0.probeIntervalMaxMs))，最近探测 \(formatDate($0.lastProbeAt))" } ?? "等待自动化配置载入",
-                    systemImage: "arrow.triangle.2.circlepath",
-                    accent: store.automation?.enabled == true ? NativePalette.accent : NativePalette.amber
-                )
-                let diagnostics = diagnosticsPresentation(summary: store.supportSummary)
-                InsightTile(
-                    title: "稳定性判断",
-                    value: diagnostics.label,
-                    detail: store.supportSummary.map { "Discord \(supportStatusPresentation($0.discord.status).label) · 环境 \(riskPresentation($0.environment.riskLevel).label)" } ?? "等待诊断摘要返回",
-                    systemImage: "waveform.path.ecg.rectangle",
-                    accent: diagnostics.tint
-                )
+            let readiness = readinessPresentation(runtime: store.runtime)
+            let diagnostics = diagnosticsPresentation(summary: store.supportSummary)
+
+            GridCard(title: "状态摘要", subtitle: "三项核心状态", systemImage: "gauge.with.dots.needle.33percent", accent: NativePalette.accent) {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        CompactMetricCell(
+                            title: "切换准备度",
+                            value: readiness.label,
+                            caption: store.runtime.map { "健康账号 \($0.switching.healthyProfiles) / 总数 \($0.switching.totalProfiles)" } ?? "等待 runtime 返回账号池状态",
+                            accent: readiness.tint
+                        )
+                        CompactMetricCell(
+                            title: "自动巡检",
+                            value: store.automation?.enabled == true ? "已开启" : "已暂停",
+                            caption: store.automation.map { "随机窗口 \(formatProbeWindow(minMs: $0.probeIntervalMinMs, maxMs: $0.probeIntervalMaxMs))" } ?? "等待自动化配置载入",
+                            accent: store.automation?.enabled == true ? NativePalette.accent : NativePalette.amber
+                        )
+                        CompactMetricCell(
+                            title: "稳定性判断",
+                            value: diagnostics.label,
+                            caption: store.supportSummary.map { "Discord \(supportStatusPresentation($0.discord.status).label) · 环境 \(riskPresentation($0.environment.riskLevel).label)" } ?? "等待诊断摘要返回",
+                            accent: diagnostics.tint
+                        )
+                    }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        CompactMetricCell(
+                            title: "切换准备度",
+                            value: readiness.label,
+                            caption: store.runtime.map { "健康账号 \($0.switching.healthyProfiles) / 总数 \($0.switching.totalProfiles)" } ?? "等待 runtime 返回账号池状态",
+                            accent: readiness.tint
+                        )
+                        CompactMetricCell(
+                            title: "自动巡检",
+                            value: store.automation?.enabled == true ? "已开启" : "已暂停",
+                            caption: store.automation.map { "随机窗口 \(formatProbeWindow(minMs: $0.probeIntervalMinMs, maxMs: $0.probeIntervalMaxMs))" } ?? "等待自动化配置载入",
+                            accent: store.automation?.enabled == true ? NativePalette.accent : NativePalette.amber
+                        )
+                        CompactMetricCell(
+                            title: "稳定性判断",
+                            value: diagnostics.label,
+                            caption: store.supportSummary.map { "Discord \(supportStatusPresentation($0.discord.status).label) · 环境 \(riskPresentation($0.environment.riskLevel).label)" } ?? "等待诊断摘要返回",
+                            accent: diagnostics.tint
+                        )
+                    }
+                }
             }
 
-            VStack(alignment: .leading, spacing: 18) {
-                GridCard(title: "快速动作", subtitle: "最常用的切换入口直接放前排", systemImage: "bolt.circle", accent: NativePalette.amber) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        AdaptiveLine(spacing: 10) {
-                            ActionButton("切到推荐账号", systemImage: "sparkles", busy: store.isBusy("activate:recommended")) {
-                                store.activateRecommended()
-                            }
-                            ActionButton("执行一轮探测", systemImage: "waveform.path.ecg", busy: store.isBusy("automation:tick")) {
-                                store.runAutomationTick()
-                            }
-                        }
-
-                        AdaptiveLine(spacing: 10) {
-                            Button("打开账号池") {
-                                store.selectedSection = .profiles
-                            }
-                            .buttonStyle(NativeSecondaryButtonStyle())
-                            Button("进入诊断中心") {
-                                store.selectedSection = .diagnostics
-                            }
-                            .buttonStyle(NativeSecondaryButtonStyle())
-                        }
-                    }
-                }
-
-                if let runtime = store.runtime {
-                    GridCard(title: "切换总览", subtitle: "用户真正关心的是有没有余量、会不会掉线", systemImage: "bolt.badge.clock", accent: NativePalette.accent) {
-                        TwoColumnFacts(items: [
-                            ("总账号数", "\(runtime.switching.totalProfiles)"),
-                            ("健康账号", "\(runtime.switching.healthyProfiles)"),
-                            ("预警账号", "\(runtime.switching.drainingProfiles)"),
-                            ("风险账号", "\(runtime.switching.riskyProfiles)"),
-                            ("总切换次数", "\(runtime.switching.totalActivations)"),
-                            ("自动切换", "\(runtime.switching.autoActivations)"),
-                            ("手动切换", "\(runtime.switching.manualActivations)"),
-                            ("推荐切换", "\(runtime.switching.recommendedActivations)"),
-                            ("最近触发", activationTriggerLabel(runtime.switching.lastActivationTrigger)),
-                            ("最近原因", present(runtime.switching.lastActivationReason, fallback: "未提供")),
-                            ("最近切换", formatDate(runtime.switching.lastActivationAt)),
-                            ("最后同步", formatDate(runtime.switching.lastSyncedAt))
-                        ])
-                    }
-
-                    GridCard(title: "Daemon 状态", subtitle: "这里说明原生壳是否真的接管了本地 runtime", systemImage: "server.rack", accent: NativePalette.mint) {
-                        TwoColumnFacts(items: [
-                            ("运行模式", runtimeModeLabel(runtime.mode)),
-                            ("PID", "\(runtime.daemon.pid)"),
-                            ("Host", runtime.daemon.host),
-                            ("Port", runtime.daemon.port.map(String.init) ?? "未提供"),
-                            ("API", present(runtime.daemon.apiBaseUrl, fallback: "未连接")),
-                            ("启动时间", formatDate(runtime.daemon.startedAt)),
-                            ("运行时长", formatDuration(ms: runtime.daemon.uptimeMs)),
-                            ("随机探测窗口", formatProbeWindow(minMs: runtime.daemon.probeIntervalMinMs, maxMs: runtime.daemon.probeIntervalMaxMs)),
-                            ("下一次探测", formatDate(runtime.daemon.nextProbeAt)),
-                            ("循环调度", runtime.daemon.loopScheduled ? "已计划" : "未计划"),
-                            ("循环执行中", runtime.daemon.loopRunning ? "执行中" : "空闲")
-                        ])
-                    }
-                }
-
-                if let supportSummary = store.supportSummary {
-                    GridCard(title: "稳定性摘要", subtitle: "让风险和恢复结果比原始日志更先被看见", systemImage: "shield.lefthalf.filled", accent: NativePalette.rose) {
-                        TwoColumnFacts(items: [
-                            ("Discord", supportStatusPresentation(supportSummary.discord.status).label),
-                            ("网关延迟", formatMillis(supportSummary.gateway.connectLatencyMs)),
-                            ("Watchdog", supportSummary.watchdog.statusLine),
-                            ("环境风险", riskPresentation(supportSummary.environment.riskLevel).label),
-                            ("最近登录", formatDate(supportSummary.discord.lastLoggedInAt)),
-                            ("最近断线", formatDate(supportSummary.discord.lastDisconnectAt)),
-                            ("15 分钟断线", "\(supportSummary.discord.disconnectCount15m)"),
-                            ("60 分钟断线", "\(supportSummary.discord.disconnectCount60m)")
-                        ])
-                    }
-                }
+            GridCard(title: "运行摘要", subtitle: "关键结果", systemImage: "list.bullet.rectangle", accent: NativePalette.mint) {
+                TwoColumnFacts(items: overviewSummaryItems)
             }
         }
+    }
+
+    private var overviewSummaryItems: [(String, String)] {
+        var items: [(String, String)] = [
+            ("当前账号", store.activeProfile?.name ?? "未激活"),
+            ("推荐账号", store.recommendedProfile?.name ?? "暂无推荐")
+        ]
+
+        if let runtime = store.runtime {
+            items += [
+                ("总账号数", "\(runtime.switching.totalProfiles)"),
+                ("健康账号", "\(runtime.switching.healthyProfiles)"),
+                ("最近切换", formatDate(runtime.switching.lastActivationAt)),
+                ("切换触发", activationTriggerLabel(runtime.switching.lastActivationTrigger)),
+                ("下一次探测", formatDate(runtime.daemon.nextProbeAt)),
+                ("Daemon", runtime.daemon.loopRunning ? "执行中" : runtime.daemon.loopScheduled ? "已驻留" : "等待启动")
+            ]
+        }
+
+        if let supportSummary = store.supportSummary {
+            items += [
+                ("Discord", supportStatusPresentation(supportSummary.discord.status).label),
+                ("环境风险", riskPresentation(supportSummary.environment.riskLevel).label),
+                ("Watchdog", supportSummary.watchdog.statusLine),
+                ("最近断线", formatDate(supportSummary.discord.lastDisconnectAt))
+            ]
+        }
+
+        return items
     }
 }
 
@@ -1008,8 +1091,8 @@ private struct ProfilesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SectionLead(
-                title: "账号池与切换面板",
-                detail: "每个 profile 都应该像一个可运营的账号单元：状态、额度、最近错误和操作按钮在同一个卡片里解决。"
+                title: "账号池",
+                detail: "看 profile 状态并直接切换。"
             )
 
             VStack(alignment: .leading, spacing: 14) {
@@ -1036,7 +1119,7 @@ private struct ProfilesSection: View {
                 )
             }
 
-            GridCard(title: "新建账号槽位", subtitle: "建议用团队或用途命名，方便自动切换说明", systemImage: "plus.circle", accent: NativePalette.accent) {
+            GridCard(title: "新建账号槽位", subtitle: "创建一个新的 profile", systemImage: "plus.circle", accent: NativePalette.accent) {
                 AdaptiveLine(spacing: 12) {
                     TextField("profile 名称，例如 team-a / backup-b", text: $newProfileName)
                         .textFieldStyle(.roundedBorder)
@@ -1050,7 +1133,7 @@ private struct ProfilesSection: View {
             }
 
             if let loginFlow = store.loginFlow {
-                GridCard(title: "登录流程", subtitle: "当前有一个账号正在等待 OAuth 回调完成", systemImage: "person.crop.circle.badge.checkmark", accent: NativePalette.amber) {
+                GridCard(title: "登录流程", subtitle: "等待浏览器回调完成", systemImage: "person.crop.circle.badge.checkmark", accent: NativePalette.amber) {
                     VStack(alignment: .leading, spacing: 10) {
                         KeyValueLine(label: "账号槽位", value: loginFlow.profileName)
                         KeyValueLine(label: "流程状态", value: loginFlow.status.rawValue)
@@ -1080,14 +1163,14 @@ private struct ProfilesSection: View {
             }
 
             if let spotlight = store.selectedProfile ?? store.activeProfile ?? store.recommendedProfile {
-                GridCard(title: "账号聚焦", subtitle: "先看这个槽位，再决定是否切换或重新登录", systemImage: "viewfinder.circle", accent: statusPresentation(for: spotlight.status).tint) {
+                GridCard(title: "账号聚焦", subtitle: "查看当前选中的 profile", systemImage: "viewfinder.circle", accent: statusPresentation(for: spotlight.status).tint) {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack(alignment: .top, spacing: 16) {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(spotlight.name)
                                     .font(.system(size: 28, weight: .bold, design: .rounded))
                                     .foregroundStyle(NativePalette.ink)
-                                Text(spotlight.accountEmail ?? "尚未绑定 ChatGPT OAuth")
+                                Text(spotlight.accountEmail ?? present(spotlight.primaryModelId, fallback: providerLabel(spotlight.primaryProviderId)))
                                     .font(.headline)
                                 Text(profileCapabilitySummary(spotlight))
                                     .font(.callout)
@@ -1168,7 +1251,7 @@ private struct ProfilesSection: View {
 
             if store.profiles.isEmpty {
                 GridCard(title: "账号池还是空的", subtitle: "先创建一个槽位，然后进入登录流程", systemImage: "tray", accent: NativePalette.amber) {
-                    Text("当前还没有任何 profile。建议先建立一个主账号和一个备用账号，这样自动切换才有真正的容错空间。")
+                    Text("当前没有 profile。先建一个主账号，再建一个备用账号。")
                         .foregroundStyle(.secondary)
                 }
             } else {
@@ -1232,9 +1315,9 @@ private struct ProfileCardView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(profile.accountEmail ?? "尚未绑定 ChatGPT OAuth")
+                        Text(profile.accountEmail ?? present(profile.primaryModelId, fallback: providerLabel(profile.primaryProviderId)))
                             .font(.title3.weight(.semibold))
-                        Text("OpenClaw \(profile.hasAuthStore ? "已登录" : "未登录") · Codex \(profile.hasCodexAuth ? "已就绪" : "未登录")")
+                        Text(profileCapabilitySummary(profile))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1258,31 +1341,26 @@ private struct ProfileCardView: View {
                     }
                 }
 
-                AdaptiveLine(spacing: 16) {
-                    quotaGauge(
-                        title: "5 小时额度",
-                        value: quotaValue(profile.quota.fiveHour),
-                        label: profile.quota.fiveHour.map { "\($0.leftPercent)%" } ?? "未提供",
-                        caption: formatDuration(ms: profile.quota.fiveHour?.resetInMs),
-                        tint: NativePalette.accent
-                    )
-                    quotaGauge(
-                        title: "周额度",
-                        value: quotaValue(profile.quota.week),
-                        label: profile.quota.week.map { "\($0.leftPercent)%" } ?? "未提供",
-                        caption: formatDuration(ms: profile.quota.week?.resetInMs),
-                        tint: NativePalette.mint
-                    )
+                if profile.supportsQuota {
+                    AdaptiveLine(spacing: 16) {
+                        quotaGauge(
+                            title: "5 小时额度",
+                            value: quotaValue(profile.quota.fiveHour),
+                            label: profile.quota.fiveHour.map { "\($0.leftPercent)%" } ?? "未提供",
+                            caption: formatDuration(ms: profile.quota.fiveHour?.resetInMs),
+                            tint: NativePalette.accent
+                        )
+                        quotaGauge(
+                            title: "周额度",
+                            value: quotaValue(profile.quota.week),
+                            label: profile.quota.week.map { "\($0.leftPercent)%" } ?? "未提供",
+                            caption: formatDuration(ms: profile.quota.week?.resetInMs),
+                            tint: NativePalette.mint
+                        )
+                    }
                 }
 
-                TwoColumnFacts(items: [
-                    ("套餐", present(profile.quota.plan)),
-                    ("令牌剩余", formatDuration(ms: profile.tokenExpiresInMs)),
-                    ("账号 ID", shortAccountId(profile.accountId)),
-                    ("Codex 账号", shortAccountId(profile.codexAccountId)),
-                    ("最近刷新", formatDate(profile.codexLastRefreshAt)),
-                    ("状态目录", profile.stateDir)
-                ])
+                TwoColumnFacts(items: profileFactItems(profile))
 
                 if let lastError = profile.lastError, !lastError.isEmpty {
                     HStack(alignment: .top, spacing: 10) {
@@ -1360,8 +1438,8 @@ private struct SettingsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SectionLead(
-                title: "策略与目录",
-                detail: "成熟软件的设置页不是把配置文件翻译成表单，而是把用户真正会改的参数做成可解释、可回退、可验证的控制面板。"
+                title: "设置",
+                detail: "改根目录和自动切换参数。"
             )
 
             VStack(alignment: .leading, spacing: 14) {
@@ -1380,7 +1458,7 @@ private struct SettingsSection: View {
                     accent: NativePalette.accent
                 )
                 InsightTile(
-                    title: "Codex 根目录",
+                    title: "可选 Codex 根目录",
                     value: URL(fileURLWithPath: store.localSnapshot.config.codexHomeDir).lastPathComponent,
                     detail: store.localSnapshot.config.codexHomeDir,
                     systemImage: "folder.badge.gear",
@@ -1389,7 +1467,7 @@ private struct SettingsSection: View {
             }
 
             VStack(alignment: .leading, spacing: 18) {
-                GridCard(title: "本地根目录", subtitle: "决定原生壳接管哪个 `.openclaw` 和 `CODEX_HOME`", systemImage: "folder.badge.gearshape", accent: NativePalette.accent) {
+                GridCard(title: "本地根目录", subtitle: "OpenClaw 必填，Codex 可选", systemImage: "folder.badge.gearshape", accent: NativePalette.accent) {
                     VStack(alignment: .leading, spacing: 14) {
                         PathHighlight(
                             title: "OpenClaw 根目录",
@@ -1410,7 +1488,7 @@ private struct SettingsSection: View {
                         Divider()
 
                         PathHighlight(
-                            title: "Codex 根目录",
+                            title: "可选 Codex 根目录",
                             path: store.localSnapshot.config.codexHomeDir,
                             tint: NativePalette.amber
                         )
@@ -1433,7 +1511,7 @@ private struct SettingsSection: View {
                             ("Manager 状态目录", present(store.runtime?.roots.managerDir)),
                             ("Runtime 目录", present(store.localSnapshot.runtimeRootPath)),
                             ("本地 API", present(store.localSnapshot.apiBaseURL, fallback: "等待启动")),
-                            ("OAuth 回调", present(store.localSnapshot.callbackURL))
+                            ("回调地址", present(store.localSnapshot.callbackURL))
                         ])
 
                         AdaptiveLine(spacing: 10) {
@@ -1453,7 +1531,7 @@ private struct SettingsSection: View {
                     }
                 }
 
-                GridCard(title: "自动切换策略", subtitle: "决定什么时候探测、什么时候自动切、哪些状态会触发迁移", systemImage: "arrow.triangle.branch", accent: NativePalette.mint) {
+                GridCard(title: "自动切换策略", subtitle: "探测窗口、阈值和触发状态", systemImage: "arrow.triangle.branch", accent: NativePalette.mint) {
                     VStack(alignment: .leading, spacing: 16) {
                         Toggle("启用自动切换", isOn: $autoActivateEnabled)
                             .toggleStyle(.switch)
@@ -1543,8 +1621,8 @@ private struct DiagnosticsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SectionLead(
-                title: "诊断中心",
-                detail: "坏的时候要像急诊台，不像日志仓库。状态、建议和修复动作需要紧贴在一起。"
+                title: "诊断",
+                detail: "看状态，点修复。"
             )
 
             if let summary = store.supportSummary {
@@ -1576,7 +1654,7 @@ private struct DiagnosticsSection: View {
                     )
                 }
 
-                GridCard(title: "修复面板", subtitle: "先说根因和影响，再给最合适的动作", systemImage: "sparkles", accent: plan.accent) {
+                GridCard(title: "修复面板", subtitle: "当前判断和可执行动作", systemImage: "sparkles", accent: plan.accent) {
                     VStack(alignment: .leading, spacing: 12) {
                         diagnosticsSummaryBlock(
                             label: "当前判断",
@@ -1594,7 +1672,7 @@ private struct DiagnosticsSection: View {
                             diagnosticsSummaryBlock(
                                 label: "原始错误",
                                 value: rawError,
-                                detail: "保留原始报错，方便你判断这是安装问题、gateway 异常，还是环境变量没有生效。"
+                                detail: "保留原始报错。"
                             )
                         }
 
@@ -1613,7 +1691,7 @@ private struct DiagnosticsSection: View {
                 }
 
                 VStack(alignment: .leading, spacing: 18) {
-                    GridCard(title: "网关与 Discord", subtitle: "优先判断是否可达、是否稳定、是否该重登", systemImage: "wave.3.right.circle", accent: NativePalette.accent) {
+                    GridCard(title: "网关和 Discord", subtitle: "连接状态", systemImage: "wave.3.right.circle", accent: NativePalette.accent) {
                         let baseItems: [(String, String)] = [
                             ("网关可达", summary.gateway.reachable ? "可达" : "不可达"),
                             ("网关延迟", formatMillis(summary.gateway.connectLatencyMs)),
@@ -1635,7 +1713,7 @@ private struct DiagnosticsSection: View {
                         TwoColumnFacts(items: gatewayItems)
                     }
 
-                    GridCard(title: "稳定守护", subtitle: "确认 watchdog 是否在盯着正确目录，以及最近有没有自动恢复", systemImage: "shield", accent: NativePalette.mint) {
+                    GridCard(title: "稳定守护", subtitle: "看目录和最近恢复", systemImage: "shield", accent: NativePalette.mint) {
                         VStack(alignment: .leading, spacing: 14) {
                             TwoColumnFacts(items: [
                                 ("状态", summary.watchdog.statusLine),
@@ -1670,7 +1748,7 @@ private struct DiagnosticsSection: View {
                         }
                     }
 
-                    GridCard(title: "环境风险", subtitle: "把 VPN、代理、网卡波动和睡眠唤醒都翻译成用户能理解的风险级别", systemImage: "exclamationmark.triangle", accent: NativePalette.rose) {
+                    GridCard(title: "环境风险", subtitle: "VPN、代理、唤醒风险", systemImage: "exclamationmark.triangle", accent: NativePalette.rose) {
                         VStack(alignment: .leading, spacing: 14) {
                             TwoColumnFacts(items: [
                                 ("风险等级", riskPresentation(summary.environment.riskLevel).label),
@@ -1710,8 +1788,8 @@ private struct DiagnosticsSection: View {
                     }
                 }
             } else {
-                GridCard(title: "诊断数据加载中", subtitle: "daemon 已启动后，这里会显示网关、Discord、watchdog 和环境风险", systemImage: "stethoscope", accent: NativePalette.amber) {
-                    Text("当前还没有拿到诊断摘要。通常是本地 runtime 刚起，或者 support summary 还没刷新完成。")
+                GridCard(title: "诊断数据加载中", subtitle: "等待 daemon 返回诊断结果", systemImage: "stethoscope", accent: NativePalette.amber) {
+                    Text("当前还没有拿到诊断摘要。")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1787,80 +1865,44 @@ private struct DeploymentSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SectionLead(
-                title: "部署与接入",
-                detail: "发布页不该只是丢几个文件名，而要把“能部署到哪、怎么接、交付给别人时带什么”讲清楚。"
+                title: "命令",
+                detail: "看命令和目录。"
             )
 
-            VStack(alignment: .leading, spacing: 14) {
-                InsightTile(
-                    title: "推荐交付形态",
-                    value: "mac 原生 app",
-                    detail: "桌面壳优先承载 daemon、诊断和账号切换工作流。",
-                    systemImage: "app.window.swipe.rectangle",
-                    accent: NativePalette.accent
-                )
-                InsightTile(
-                    title: "Web 兼容",
-                    value: store.runtime?.compatibility.browserShellSupported == true ? "可部署" : "受限",
-                    detail: store.runtime?.compatibility.allowedOrigins.isEmpty == true
-                        ? "当前只放行同源或本地壳。"
-                        : "允许来源 \(store.runtime?.compatibility.allowedOrigins.count ?? 0) 个。",
-                    systemImage: "globe.asia.australia",
-                    accent: store.runtime?.compatibility.browserShellSupported == true ? NativePalette.mint : NativePalette.amber
-                )
-                InsightTile(
-                    title: "标准分发包",
-                    value: "ZIP / DMG / PKG",
-                    detail: "三套产物服务于拖拽分发、标准安装和压缩交付。",
-                    systemImage: "shippingbox.circle",
-                    accent: NativePalette.amber
-                )
-            }
-
             if let runtime = store.runtime {
-                GridCard(title: "交付检查清单", subtitle: "发给别人之前，至少要确认下面这几件事", systemImage: "checklist", accent: NativePalette.mint) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("1. 原生 app 已指向正确的 `.openclaw` 与 `CODEX_HOME` 根目录。")
-                        Text("2. `PKG` 面向标准安装，`DMG` 面向拖拽分发，`ZIP` 面向快速压缩交付。")
-                        Text("3. 如果需要 Web 接入，先确认允许来源和 localhost dev 策略。")
-                        Text("4. 交付前至少跑一轮自动探测，确保推荐账号与 watchdog 状态正常。")
-                    }
-                    .foregroundStyle(.secondary)
-                }
-
                 VStack(alignment: .leading, spacing: 18) {
-                    GridCard(title: "兼容性边界", subtitle: "明确原生壳、浏览器壳和 Web 部署的支持范围", systemImage: "network", accent: NativePalette.accent) {
+                    GridCard(title: "兼容性", subtitle: "当前支持范围", systemImage: "network", accent: NativePalette.accent) {
                         TwoColumnFacts(items: [
                             ("运行模式", runtimeModeLabel(runtime.mode)),
-                            ("推荐原生壳", runtime.compatibility.nativeShellRecommended ? "推荐" : "非必需"),
+                            ("原生壳", runtime.compatibility.nativeShellRecommended ? "推荐" : "可选"),
                             ("支持浏览器壳", runtime.compatibility.browserShellSupported ? "支持" : "不支持"),
                             ("允许 localhost dev", runtime.compatibility.allowLocalhostDev ? "允许" : "关闭"),
                             ("允许来源", runtime.compatibility.allowedOrigins.isEmpty ? "仅同源 / 本地壳" : runtime.compatibility.allowedOrigins.joined(separator: " · ")),
-                            ("OAuth 回调", runtime.roots.oauthCallbackUrl)
+                            ("回调地址", runtime.roots.oauthCallbackUrl)
                         ])
                     }
 
-                    GridCard(title: "命令接入", subtitle: "保留 wrapper 级入口，方便接回命令行或其他桌面工具", systemImage: "terminal", accent: NativePalette.mint) {
+                    GridCard(title: "命令", subtitle: "常用入口", systemImage: "terminal", accent: NativePalette.mint) {
                         VStack(alignment: .leading, spacing: 12) {
-                            CommandBlock(title: "openclaw wrapper", value: runtime.compatibility.wrapperCommand)
-                            CommandBlock(title: "codex wrapper", value: runtime.compatibility.codexWrapperCommand)
+                            CommandBlock(title: "OpenClaw", value: runtime.compatibility.wrapperCommand)
+                            CommandBlock(title: "Codex", value: runtime.compatibility.codexWrapperCommand)
                         }
                     }
 
-                    GridCard(title: "目录与分发", subtitle: "交付时至少要知道 app 依赖哪些根目录和状态目录", systemImage: "shippingbox", accent: NativePalette.amber) {
+                    GridCard(title: "目录", subtitle: "当前使用的路径", systemImage: "shippingbox", accent: NativePalette.amber) {
                         TwoColumnFacts(items: [
                             ("OpenClaw Home", runtime.roots.openclawHomeDir),
-                            ("Codex Home", runtime.roots.codexHomeDir),
+                            ("可选 Codex Home", runtime.roots.codexHomeDir),
                             ("默认状态目录", runtime.roots.defaultOpenClawStateDir),
-                            ("默认 CODEX_HOME", runtime.roots.defaultCodexHome),
+                            ("默认 Codex", runtime.roots.defaultCodexHome),
                             ("Manager 状态目录", runtime.roots.managerDir),
                             ("Runtime 目录", present(store.localSnapshot.runtimeRootPath))
                         ])
                     }
                 }
             } else {
-                GridCard(title: "等待 runtime 就绪", subtitle: "等原生 daemon 上线后，这里会展示兼容性与分发信息", systemImage: "shippingbox", accent: NativePalette.amber) {
-                    Text("当前还没有可展示的部署信息。")
+                GridCard(title: "等待 runtime", subtitle: "runtime 就绪后展示命令和目录", systemImage: "shippingbox", accent: NativePalette.amber) {
+                    Text("当前还没有可展示的数据。")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1896,6 +1938,32 @@ private struct HeroInfoTile: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(NativePalette.border, lineWidth: 1)
         )
+    }
+}
+
+private struct CompactMetaRow: View {
+    var label: String
+    var value: String
+    var detail: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.70))
+            Text(value)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .textSelection(.enabled)
+                .lineLimit(1)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(Color.white.opacity(0.68))
+                    .lineLimit(2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -2237,6 +2305,46 @@ private struct MetricTile: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NativePalette.border, lineWidth: 1)
+        )
+    }
+}
+
+private struct CompactMetricCell: View {
+    var title: String
+    var value: String
+    var caption: String
+    var accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 7, height: 7)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(value)
+                .font(.system(size: 17, weight: .bold, design: .rounded))
+                .foregroundStyle(NativePalette.ink)
+                .lineLimit(1)
+
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(NativePalette.surfaceAlt)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(NativePalette.border, lineWidth: 1)
         )
     }

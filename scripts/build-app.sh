@@ -18,7 +18,6 @@ EXECUTABLE_TARGET="$APP_DIR/Contents/MacOS/$PRODUCT_NAME"
 RESOURCES_DIR="$APP_DIR/Contents/Resources"
 SCRIPTS_DIR="$RESOURCES_DIR/scripts"
 RUNTIME_SOURCE="$ROOT_DIR/vendor/runtime"
-NODE_ENTITLEMENTS="$ROOT_DIR/assets/OpenClawNode.entitlements"
 APP_ENTITLEMENTS="$ROOT_DIR/assets/OpenClawManager.entitlements"
 
 resolve_codesign_identity() {
@@ -65,9 +64,6 @@ sign_app_bundle() {
       "$EXECUTABLE_TARGET")
         continue
         ;;
-      */runtime/node_modules/node/bin/node)
-        codesign_file "$identity" "$file_path" "$NODE_ENTITLEMENTS"
-        ;;
       *)
         codesign_file "$identity" "$file_path"
         ;;
@@ -110,10 +106,10 @@ cp "$EXECUTABLE_SOURCE" "$EXECUTABLE_TARGET"
 chmod +x "$EXECUTABLE_TARGET"
 cp "$ROOT_DIR/assets/$ICON_BASENAME.icns" "$RESOURCES_DIR/$ICON_BASENAME.icns"
 rsync -a --delete "$RUNTIME_SOURCE/" "$RESOURCES_DIR/runtime/"
-for script_name in install-watchdog.sh uninstall-watchdog.sh watchdog-status.sh openclaw-watchdog.mjs; do
+for script_name in install-watchdog.sh uninstall-watchdog.sh watchdog-status.sh; do
   cp "$ROOT_DIR/scripts/$script_name" "$SCRIPTS_DIR/$script_name"
 done
-chmod 755 "$SCRIPTS_DIR"/*.sh "$SCRIPTS_DIR/openclaw-watchdog.mjs"
+chmod 755 "$SCRIPTS_DIR"/*.sh
 
 cat > "$APP_DIR/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

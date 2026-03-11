@@ -3,43 +3,22 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SOURCE_ROOT="${MANAGER_SOURCE_ROOT:-$ROOT_DIR/../codex-pool-management}"
 RUNTIME_DIR="$ROOT_DIR/vendor/runtime"
+DAEMON_PATH="$RUNTIME_DIR/openclaw-manager-daemon"
+WATCHDOG_PATH="$RUNTIME_DIR/openclaw-watchdog"
 
+rm -rf "$RUNTIME_DIR"
 mkdir -p "$RUNTIME_DIR"
 
-cat > "$RUNTIME_DIR/package.json" <<'EOF'
-{
-  "name": "openclaw-manager-native-runtime",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@fastify/cors": "^10.1.0",
-    "dotenv": "^17.2.2",
-    "fastify": "^5.3.3",
-    "luxon": "^3.7.0",
-    "node": "22.22.1",
-    "pg": "^8.17.2",
-    "zod": "^4.3.5"
-  }
-}
-EOF
-
-echo "同步源项目: $SOURCE_ROOT"
+echo "编译 Go runtime..."
 (
-  cd "$SOURCE_ROOT"
-  npm run build
+  cd "$ROOT_DIR"
+  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o "$DAEMON_PATH" ./cmd/openclaw-manager-daemon
+  GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o "$WATCHDOG_PATH" ./cmd/openclaw-watchdog
 )
 
-(
-  cd "$RUNTIME_DIR"
-  npm install --omit=dev --no-fund --no-audit
-)
+chmod 755 "$DAEMON_PATH"
+chmod 755 "$WATCHDOG_PATH"
 
-mkdir -p "$RUNTIME_DIR/apps/api" "$RUNTIME_DIR/apps/web"
-rsync -a --delete "$SOURCE_ROOT/apps/api/dist/" "$RUNTIME_DIR/apps/api/dist/"
-rsync -a --delete "$SOURCE_ROOT/apps/web/dist/" "$RUNTIME_DIR/apps/web/dist/"
-cp "$ROOT_DIR/runtime/ui-server.mjs" "$RUNTIME_DIR/ui-server.mjs"
-
-echo "runtime 已同步到: $RUNTIME_DIR"
-
+echo "Go runtime 已同步到: $DAEMON_PATH"
+echo "Go watchdog 已同步到: $WATCHDOG_PATH"

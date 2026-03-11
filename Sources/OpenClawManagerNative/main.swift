@@ -16,7 +16,7 @@ private enum RuntimeRootTarget: Sendable {
     case codex
 }
 
-final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable {
+final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @unchecked Sendable {
     private let appName = "OpenClaw Manager Native"
     private let apiPreferredPort: UInt16 = 3311
     private let callbackPreferredPort: UInt16 = 1455
@@ -69,11 +69,15 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            ensureWindow()
+        MainActor.assumeIsolated {
+            presentMainWindow()
         }
-        window?.makeKeyAndOrderFront(nil)
         return true
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
     }
 
     private func configureStoreActions() {
@@ -798,7 +802,7 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
             configMenu.addItem(withTitle: "选择 OpenClaw 根目录...", action: #selector(selectOpenClawRoot(_:)), keyEquivalent: "o").target = self
             configMenu.addItem(withTitle: "重置 OpenClaw 根目录为当前用户 Home", action: #selector(resetOpenClawRoot(_:)), keyEquivalent: "").target = self
             configMenu.addItem(.separator())
-            let codexInfo = NSMenuItem(title: "Codex 根目录: \(shortPath(currentConfig.codexHomeDir))", action: nil, keyEquivalent: "")
+            let codexInfo = NSMenuItem(title: "可选 Codex 根目录: \(shortPath(currentConfig.codexHomeDir))", action: nil, keyEquivalent: "")
             codexInfo.isEnabled = false
             configMenu.addItem(codexInfo)
             configMenu.addItem(withTitle: "选择 Codex 根目录...", action: #selector(selectCodexRoot(_:)), keyEquivalent: "c").target = self
@@ -891,7 +895,7 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
         let watchdog = collectWatchdogSummary()
         var details: [String] = []
         details.append("OpenClaw 根目录: \(currentConfig.openclawHomeDir)")
-        details.append("Codex 根目录: \(currentConfig.codexHomeDir)")
+        details.append("可选 Codex 根目录: \(currentConfig.codexHomeDir)")
         details.append("稳定守护: \(watchdog.statusLine)")
         details.append("期望监控目录: \(expectedWatchdogStateDirPath())")
         if let monitoredStateDir = watchdog.monitoredStateDir {
@@ -923,7 +927,7 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
             details.append("本地 API: http://127.0.0.1:\(currentApiPort)/api")
         }
         if let currentCallbackPort {
-            details.append("OAuth 回调: http://localhost:\(currentCallbackPort)/auth/callback")
+            details.append("回调地址: http://localhost:\(currentCallbackPort)/auth/callback")
         }
         showInfo(message: "当前配置", detail: details.joined(separator: "\n"))
     }
@@ -937,7 +941,7 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
     }
 
     @objc private func selectCodexRoot(_ sender: Any?) {
-        selectDirectory(title: "选择 Codex 根目录", target: .codex)
+        selectDirectory(title: "选择可选 Codex 根目录", target: .codex)
     }
 
     @objc private func resetCodexRoot(_ sender: Any?) {
@@ -976,9 +980,7 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
 
     @objc private func showMainWindow(_ sender: Any?) {
         MainActor.assumeIsolated {
-            ensureWindow()
-            window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            presentMainWindow()
         }
     }
 
@@ -996,7 +998,7 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
             let result = try runCommand(
                 executableURL: URL(fileURLWithPath: "/bin/bash"),
                 arguments: [scriptURL.path],
-                environment: try watchdogScriptEnvironment(includeBundledNode: true)
+                environment: try watchdogScriptEnvironment()
             )
             try requireSuccess(result, context: "启用稳定守护失败")
             pushLocalSnapshotToStore()
@@ -1054,17 +1056,16 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
         if !watchdog.installed {
             details.append("尚未启用，可从“稳定守护 -> 启用稳定守护”完成安装。")
         } else if !watchdog.configuredForCurrentRoot {
-            details.append("当前 watchdog 监控目录与本 app 选择的 OpenClaw 根目录不一致，建议重新执行“启用稳定守护”。")
+            details.append("watchdog 监控目录不一致，重新执行“启用稳定守护”即可。")
         }
         showInfo(message: "稳定守护状态", detail: details.joined(separator: "\n"))
     }
 
     @objc private func runWatchdogCheckNow(_ sender: Any?) {
         do {
-            let scriptURL = try bundledScriptURL(named: "openclaw-watchdog.mjs")
             let result = try runCommand(
-                executableURL: try bundledNodeURL(),
-                arguments: [scriptURL.path, "--once"],
+                executableURL: try bundledRuntimeExecutableURL(named: "openclaw-watchdog"),
+                arguments: ["--once"],
                 environment: try watchdogScriptEnvironment()
             )
             try requireSuccess(result, context: "执行守护巡检失败")
@@ -1249,26 +1250,22 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
         return scriptURL
     }
 
-    private func bundledNodeURL() throws -> URL {
+    private func bundledRuntimeExecutableURL(named name: String) throws -> URL {
         guard let resourceURL = Bundle.main.resourceURL else {
             throw NSError(domain: appName, code: 9, userInfo: [NSLocalizedDescriptionKey: "未找到 app 资源目录"])
         }
-        let nodeURL = resourceURL.appendingPathComponent("runtime/node_modules/node/bin/node")
-        guard FileManager.default.isExecutableFile(atPath: nodeURL.path) else {
-            throw NSError(domain: appName, code: 10, userInfo: [NSLocalizedDescriptionKey: "未找到内置 node 运行时"])
+        let executableURL = resourceURL.appendingPathComponent("runtime/\(name)")
+        guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
+            throw NSError(domain: appName, code: 10, userInfo: [NSLocalizedDescriptionKey: "缺少内置运行时: \(name)"])
         }
-        return nodeURL
+        return executableURL
     }
 
-    private func watchdogScriptEnvironment(includeBundledNode: Bool = false) throws -> [String: String] {
-        var environment: [String: String] = [
+    private func watchdogScriptEnvironment() throws -> [String: String] {
+        [
             "OPENCLAW_WATCHDOG_OPENCLAW_ROOT": currentConfig.openclawHomeDir,
             "OPENCLAW_STATE_DIR": expectedWatchdogStateDirPath()
         ]
-        if includeBundledNode {
-            environment["OPENCLAW_WATCHDOG_NODE"] = try bundledNodeURL().path
-        }
-        return environment
     }
 
     private func runCommand(
@@ -1360,14 +1357,27 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
             window.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.isMovableByWindowBackground = true
-            window.toolbarStyle = .expanded
+            window.isReleasedWhenClosed = false
+            window.toolbarStyle = .unifiedCompact
             window.minSize = NSSize(width: 1120, height: 760)
             window.center()
+            window.delegate = self
             window.contentViewController = hostingController
             window.makeKeyAndOrderFront(nil)
 
             self.window = window
+        }
+    }
+
+    private func presentMainWindow() {
+        MainActor.assumeIsolated {
+            ensureWindow()
+            guard let window else { return }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -1384,17 +1394,15 @@ final class AppController: NSObject, NSApplicationDelegate, @unchecked Sendable 
         let apiPort = try findFreePort(preferred: apiPreferredPort)
         let callbackPort = try findFreePort(preferred: callbackPreferredPort)
 
-        let nodeURL = runtimeRootURL.appendingPathComponent("node_modules/node/bin/node")
-        let backendScriptURL = runtimeRootURL.appendingPathComponent("apps/api/dist/server.js")
+        let daemonURL = runtimeRootURL.appendingPathComponent("openclaw-manager-daemon")
         let stateURL = appSupportURL!.appendingPathComponent("manager-state", isDirectory: true)
 
         try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true)
 
         backendProcess = try launchProcess(
-            executableURL: nodeURL,
-            arguments: [backendScriptURL.path],
+            executableURL: daemonURL,
+            arguments: [],
             environment: [
-                "NODE_ENV": "production",
                 "OPENCLAW_MANAGER_RUNTIME_MODE": "native",
                 "HOST": "127.0.0.1",
                 "PORT": String(apiPort),
