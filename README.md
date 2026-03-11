@@ -1,123 +1,107 @@
 # OpenClaw Manager Native
 
-这是 `OpenClaw Manager 1.0` 的 macOS Swift 原生桌面版。
+OpenClaw Manager Native 是面向 macOS 的 OpenClaw 本地管理桌面版。
 
-它不是 Electron 壳，而是：
+它的目标很直接：
 
-1. 使用 `Swift + AppKit + WKWebView` 提供原生窗口和菜单
-2. 在 app 内部自带 `Node` 运行时与 `manager` 后端
-3. 在本机自动启动本地 API 和本地静态代理，再由 `WKWebView` 访问
+- 管理 `.openclaw` 和 `.openclaw-*` profile
+- 用图形界面维护本地 OpenClaw 状态
+- 直接在桌面端执行诊断、修复和服务重启
+- 产出可分发的 `.app`、`.dmg`、`.pkg`、`.zip`
 
-## 目录
+当前版本：`1.0.5`
 
-- `Sources/OpenClawManagerNative/main.swift`: 原生桌面壳
-- `runtime/ui-server.mjs`: 本地静态代理和 `/api` 转发
-- `scripts/sync-runtime.sh`: 构建并同步 `codex-pool-management`
-- `scripts/build-app.sh`: 生成 `.app`
-- `scripts/package-app.sh`: 生成 app zip
-- `scripts/package-dmg.sh`: 生成 dmg 安装包
-- `scripts/package-pkg.sh`: 生成 pkg 安装包
-- `scripts/package-delivery.sh`: 生成可直接发人的完整交付包
+## 技术架构
+
+当前仓库已经不是旧的 `WKWebView + Node runtime` 方案，实际结构如下：
+
+1. `macOS Native Shell`
+   - `Sources/OpenClawManagerNative/main.swift`
+   - 负责应用生命周期、窗口、菜单栏、安装态启动链和本地 runtime 管理
+
+2. `Native UI`
+   - `Sources/OpenClawManagerNative/NativeShellView.swift`
+   - `Sources/OpenClawManagerNative/NativeStore.swift`
+   - 使用 SwiftUI 渲染主界面，通过本地 HTTP API 拉取状态和触发动作
+
+3. `Bundled Go Daemon`
+   - `cmd/openclaw-manager-daemon/main.go`
+   - 提供本地管理 API，负责 profile 发现、provider 识别、诊断摘要、修复动作、Gateway 服务检查和自动化状态
+
+4. `Bundled Go Watchdog`
+   - `cmd/openclaw-watchdog/main.go`
+   - 用于安装可选的本机 watchdog，持续监控 OpenClaw gateway 卡死、超时和异常恢复
+
+5. `Packaging / Delivery Pipeline`
+   - `scripts/build-app.sh`
+   - `scripts/package-app.sh`
+   - `scripts/package-dmg.sh`
+   - `scripts/package-pkg.sh`
+   - `scripts/package-delivery.sh`
+   - 负责构建原生 app、同步 bundled runtime、签名、封装和生成完整交付包
+
+整体调用关系：
+
+```text
+Swift App / Menu Bar / SwiftUI
+            |
+            v
+   localhost HTTP API
+            |
+            v
+openclaw-manager-daemon (Go)
+            |
+            v
+OpenClaw CLI / 本地配置 / launchd / gateway / watchdog
+```
+
+## 仓库结构
+
+- `Sources/OpenClawManagerNative/`: 原生桌面壳和 UI
+- `cmd/openclaw-manager-daemon/`: 本地管理 daemon
+- `cmd/openclaw-watchdog/`: 本机 watchdog
+- `scripts/`: 构建、打包、签名、公证和 watchdog 脚本
+- `docs/releases/`: 每个版本的发布记录
+- `assets/`: 图标、entitlements 等打包资源
+- `vendor/runtime/`: 打包进 app 的 runtime 输出目录
 
 ## 使用
 
-最终用户使用说明见 [USAGE.md](./USAGE.md)。
+最终用户说明：
 
-如果你要直接发给别人安装，优先附上 [QUICKSTART.md](./QUICKSTART.md)。
+- [USAGE.md](./USAGE.md)
+- [QUICKSTART.md](./QUICKSTART.md)
+- [INSTALL.md](./INSTALL.md)
 
-开发运行：
+本地开发：
 
 ```bash
 cd /Users/Zhuanz/work-space/openclaw-manager-native
-bash ./scripts/sync-runtime.sh
 swift run OpenClawManagerNative
 ```
 
-打 app：
+构建原生 app：
 
 ```bash
 bash ./scripts/build-app.sh
 ```
 
-打 app zip：
+生成发布包：
 
 ```bash
-bash ./scripts/package-app.sh
+bash ./scripts/package-delivery.sh
 ```
 
-打 dmg：
-
-```bash
-bash ./scripts/package-dmg.sh
-```
-
-打 pkg：
-
-```bash
-bash ./scripts/package-pkg.sh
-```
-
-做公证并重新封装 zip：
+如果需要公证：
 
 ```bash
 OPENCLAW_NOTARY_KEYCHAIN_PROFILE="你的 profile 名称" \
 bash ./scripts/notarize-app.sh
 ```
 
-打完整交付包：
-
-```bash
-bash ./scripts/package-delivery.sh
-```
-
-## 原生菜单
-
-桌面版除了主窗口，还会在 macOS 顶部菜单栏放一个常驻小工具。
-
-你可以直接从菜单栏里完成这些高频动作：
-
-- 查看当前激活账号和推荐账号
-- 查看自动切换是否开启
-- 直接切到推荐账号
-- 直接切到任意已发现账号
-- 直接开启或关闭自动切换
-- 立即执行一轮探测
-- 打开主窗口
-
-桌面版内也可以直接：
-
-- 选择 `OpenClaw` 根目录
-- 选择 `Codex` 根目录
-- 打开设置文件
-- 打开应用数据目录
-- 打开 Manager 状态目录
-- 重启本地服务并刷新窗口
-
-## 当前边界
-
-- 当前打包链路默认是 `Apple Silicon / arm64`
-- 默认会自动签名：优先使用本机 `Developer ID Application`，找不到就退回 `ad-hoc` 签名
-- 如果要在别人电脑上更顺利安装，仍建议使用 `Developer ID + notarization`
-- 核心账号管理逻辑仍复用现有的 `codex-pool-management`
-- Web 控制台兼容独立部署，native 版负责更快的本地体验和分发
-
-## 签名与公证
-
-- 本机如果没有 `Developer ID Application` 证书，构建脚本会自动使用 `ad-hoc` 签名，至少保证 `.app` 不是无效签名 bundle。
-- 如果你已经安装了 `Developer ID Application` 证书，脚本会自动使用它，并启用 hardened runtime。
-- 公证使用 `notarytool` 的 keychain profile。可先手动保存：
-
-```bash
-xcrun notarytool store-credentials "你的 profile 名称" \
-  --apple-id "你的 Apple ID" \
-  --team-id "你的 Team ID" \
-  --password "app-specific password"
-```
-
-
 ## Watchdog
 
-如果你的 OpenClaw 对话偶发卡死，可以启用本机 watchdog 守护进程。它会持续监控 `gateway.log`、会话锁和 gateway 进程状态；检测到 `embedded run timeout`、`lane wait exceeded`、`Slow listener detected` 或长时间卡住的会话锁时，会自动重启 `ai.openclaw.gateway`。
+如果你的 OpenClaw gateway 偶发卡死，可以启用本机 watchdog。它会监控 gateway 日志、会话锁和进程状态，并在检测到超时或卡死时自动恢复。
 
 最终用户优先直接在 app 菜单里操作：
 
@@ -128,28 +112,31 @@ xcrun notarytool store-credentials "你的 profile 名称" \
 稳定守护 -> 停用稳定守护
 ```
 
-如果你在源码目录里调试，也可以继续用脚本：
-
-安装：
+源码目录下也可以直接调用脚本：
 
 ```bash
 bash ./scripts/install-watchdog.sh
-```
-
-单次检查：
-
-```bash
-node ./scripts/openclaw-watchdog.mjs --once --check-only
-```
-
-查看守护状态：
-
-```bash
 bash ./scripts/watchdog-status.sh
-```
-
-卸载：
-
-```bash
 bash ./scripts/uninstall-watchdog.sh
 ```
+
+## CHANGELOG
+
+详细发布记录放在 `docs/releases/`：
+
+- [1.0.5](./docs/releases/1.0.5.md) 诊断快路径、启动链死锁修复、后台空闲 CPU 继续收口
+- [1.0.4](./docs/releases/1.0.4.md) 诊断中心稳定性和性能收口
+- [1.0.3](./docs/releases/1.0.3.md) provider-aware 第一阶段和文案收紧
+
+如果继续发版，这里保持最近几个版本入口，完整记录继续落在 `docs/releases/`。
+
+## 签名与分发
+
+- 默认目标平台：`Apple Silicon / arm64`
+- 构建脚本会优先使用本机 `Developer ID Application`
+- 没有证书时会退回 `ad-hoc` 签名
+- 正式对外分发仍建议走 `Developer ID + notarization`
+
+## License
+
+本项目采用 [MIT License](./LICENSE)。
