@@ -191,6 +191,16 @@ private func providerLabel(_ providerId: String?) -> String {
     }
 }
 
+private func profileSupportsCodexLogin(_ profile: ManagedProfileSnapshot) -> Bool {
+    if let providerId = profile.primaryProviderId, !providerId.isEmpty {
+        return providerId == "openai-codex"
+    }
+    if profile.configuredProviderIds.contains("openai-codex") {
+        return true
+    }
+    return profile.primaryModelId == nil
+}
+
 private func present(_ value: String?, fallback: String = "未提供") -> String {
     guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return fallback
@@ -1133,7 +1143,7 @@ private struct ProfilesSection: View {
             }
 
             if let loginFlow = store.loginFlow {
-                GridCard(title: "登录流程", subtitle: "等待浏览器回调完成", systemImage: "person.crop.circle.badge.checkmark", accent: NativePalette.amber) {
+                GridCard(title: "Codex 登录流程", subtitle: "等待浏览器回调完成", systemImage: "person.crop.circle.badge.checkmark", accent: NativePalette.amber) {
                     VStack(alignment: .leading, spacing: 10) {
                         KeyValueLine(label: "账号槽位", value: loginFlow.profileName)
                         KeyValueLine(label: "流程状态", value: loginFlow.status.rawValue)
@@ -1190,35 +1200,32 @@ private struct ProfilesSection: View {
                             }
                         }
 
-                        AdaptiveLine(spacing: 16) {
-                            spotlightGauge(
-                                title: "5 小时额度",
-                                value: quotaValue(spotlight.quota.fiveHour),
-                                label: spotlight.quota.fiveHour.map { "\($0.leftPercent)%" } ?? "未提供",
-                                caption: formatDuration(ms: spotlight.quota.fiveHour?.resetInMs),
-                                tint: NativePalette.accent
-                            )
-                            spotlightGauge(
-                                title: "周额度",
-                                value: quotaValue(spotlight.quota.week),
-                                label: spotlight.quota.week.map { "\($0.leftPercent)%" } ?? "未提供",
-                                caption: formatDuration(ms: spotlight.quota.week?.resetInMs),
-                                tint: NativePalette.mint
-                            )
+                        if spotlight.supportsQuota {
+                            AdaptiveLine(spacing: 16) {
+                                spotlightGauge(
+                                    title: "5 小时额度",
+                                    value: quotaValue(spotlight.quota.fiveHour),
+                                    label: spotlight.quota.fiveHour.map { "\($0.leftPercent)%" } ?? "未提供",
+                                    caption: formatDuration(ms: spotlight.quota.fiveHour?.resetInMs),
+                                    tint: NativePalette.accent
+                                )
+                                spotlightGauge(
+                                    title: "周额度",
+                                    value: quotaValue(spotlight.quota.week),
+                                    label: spotlight.quota.week.map { "\($0.leftPercent)%" } ?? "未提供",
+                                    caption: formatDuration(ms: spotlight.quota.week?.resetInMs),
+                                    tint: NativePalette.mint
+                                )
+                            }
                         }
 
-                        TwoColumnFacts(items: [
-                            ("状态说明", spotlight.statusReason),
-                            ("套餐", present(spotlight.quota.plan)),
-                            ("令牌剩余", formatDuration(ms: spotlight.tokenExpiresInMs)),
-                            ("最近刷新", formatDate(spotlight.codexLastRefreshAt)),
-                            ("账号 ID", shortAccountId(spotlight.accountId)),
-                            ("状态目录", spotlight.stateDir)
-                        ])
+                        TwoColumnFacts(items: [("状态说明", spotlight.statusReason)] + profileFactItems(spotlight))
 
                         AdaptiveLine(spacing: 10) {
-                            ActionButton("登录这个账号", systemImage: "person.badge.key", busy: store.isBusy("login:\(spotlight.name)")) {
-                                store.login(profileName: spotlight.name)
+                            if profileSupportsCodexLogin(spotlight) {
+                                ActionButton("登录 Codex", systemImage: "person.badge.key", busy: store.isBusy("login:\(spotlight.name)")) {
+                                    store.login(profileName: spotlight.name)
+                                }
                             }
                             ActionButton("探测这个账号", systemImage: "scope", busy: store.isBusy("probe:\(spotlight.name)")) {
                                 store.probe(profileName: spotlight.name)
@@ -1382,8 +1389,10 @@ private struct ProfileCardView: View {
                         store.selectProfile(profile.name)
                     }
                     .buttonStyle(NativeSecondaryButtonStyle())
-                    ActionButton("登录", systemImage: "person.badge.key", busy: store.isBusy("login:\(profile.name)")) {
-                        store.login(profileName: profile.name)
+                    if profileSupportsCodexLogin(profile) {
+                        ActionButton("登录 Codex", systemImage: "person.badge.key", busy: store.isBusy("login:\(profile.name)")) {
+                            store.login(profileName: profile.name)
+                        }
                     }
                     ActionButton("探测", systemImage: "scope", busy: store.isBusy("probe:\(profile.name)")) {
                         store.probe(profileName: profile.name)

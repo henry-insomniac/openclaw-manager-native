@@ -1,6 +1,10 @@
 .DS_Store
 .build/
 release/
+!release/
+release/*
+!release/OpenClawManagerNative-1.0.3-delivery.zip
+!release/OpenClawManagerNative-1.0.3-SHA256SUMS.txt
 vendor/runtime/
 assets/*.iconset/
 assets/*.png
