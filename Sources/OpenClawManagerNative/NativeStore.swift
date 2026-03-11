@@ -96,6 +96,10 @@ enum NativeSection: String, CaseIterable, Identifiable, Sendable {
 }
 
 enum SupportRepairAction: String, Codable, CaseIterable, Identifiable, Sendable {
+    case validateConfig = "validate_config"
+    case runOpenClawDoctor = "run_openclaw_doctor"
+    case runOpenClawDoctorFix = "run_openclaw_doctor_fix"
+    case reinstallGatewayService = "reinstall_gateway_service"
     case runWatchdogCheck = "run_watchdog_check"
     case restartGateway = "restart_gateway"
     case reinstallWatchdog = "reinstall_watchdog"
@@ -136,6 +140,9 @@ struct ManagedProfileSnapshot: Decodable, Equatable, Identifiable, Sendable {
     var primaryModelId: String?
     var configuredProviderIds: [String]
     var supportsQuota: Bool
+    var supportsLogin: Bool
+    var loginKind: String?
+    var companionRuntimeKind: String?
     var codexHome: String
     var codexConfigPath: String
     var codexAuthPath: String
@@ -321,11 +328,43 @@ struct SupportSummary: Decodable, Equatable, Sendable {
         var recommendation: String
     }
 
+    struct Maintenance: Decodable, Equatable, Sendable {
+        struct Config: Decodable, Equatable, Sendable {
+            var path: String
+            var exists: Bool
+            var valid: Bool
+            var detail: String
+        }
+
+        struct GatewayService: Decodable, Equatable, Sendable {
+            var installed: Bool
+            var status: String
+            var serviceFile: String?
+            var cliConfigPath: String?
+            var serviceConfigPath: String?
+            var logPath: String?
+            var command: String?
+            var runtimeStatus: String?
+            var probeStatus: String?
+            var issue: String?
+            var recommendation: String?
+        }
+
+        var cliPath: String?
+        var stateDir: String
+        var config: Config
+        var gatewayService: GatewayService
+        var doctorCommand: String
+        var doctorFixCommand: String
+        var gatewayInstallCommand: String
+    }
+
     var collectedAt: String
     var gateway: Gateway
     var discord: Discord
     var watchdog: Watchdog
     var environment: Environment
+    var maintenance: Maintenance
 }
 
 struct SupportRepairResult: Decodable, Equatable, Sendable {
@@ -399,6 +438,7 @@ struct NativeAppActions: Sendable {
 final class NativeAppStore: ObservableObject, @unchecked Sendable {
     @Published var summary: ManagerSummary?
     @Published var supportSummary: SupportSummary?
+    @Published var lastSupportRepairResult: SupportRepairResult?
     @Published var loginFlow: LoginFlowSnapshot?
     @Published var selectedSection: NativeSection = .overview
     @Published var selectedProfileName: String?
@@ -516,6 +556,12 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         restartLoginFlowTimerIfNeeded()
     }
 
+    func applySupportRepairResult(_ result: SupportRepairResult) {
+        lastSupportRepairResult = result
+        supportSummary = result.summary
+        isLoading = false
+    }
+
     func clearLoginFlow() {
         loginFlow = nil
         restartLoginFlowTimerIfNeeded()
@@ -557,6 +603,10 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         guard let authURL = loginFlow?.authUrl, let url = URL(string: authURL) else {
             return
         }
+        actions.openURL(url)
+    }
+
+    func open(_ url: URL) {
         actions.openURL(url)
     }
 

@@ -41,6 +41,8 @@ const (
 	commandTimeout              = 20 * time.Second
 	logTailBytes                = 512 * 1024
 	refreshSkew                 = 5 * time.Minute
+	usageCacheTTL               = 45 * time.Second
+	staleUsageCacheTTL          = 10 * time.Minute
 	oauthTimeout                = 10 * time.Minute
 	legacyDefaultPollIntervalMs = 60_000
 	minProbeIntervalMs          = 30_000
@@ -94,6 +96,12 @@ type App struct {
 	callbackServer      *http.Server
 	automationTimer     *time.Timer
 	automationRunning   bool
+	usageCache          map[string]cachedUsageSnapshot
+}
+
+type cachedUsageSnapshot struct {
+	Quota     UsageSnapshot
+	FetchedAt time.Time
 }
 
 type ManagerStateFile struct {
@@ -187,6 +195,9 @@ type ManagedProfileSnapshot struct {
 	PrimaryModelID        *string       `json:"primaryModelId,omitempty"`
 	ConfiguredProviderIDs []string      `json:"configuredProviderIds"`
 	SupportsQuota         bool          `json:"supportsQuota"`
+	SupportsLogin         bool          `json:"supportsLogin"`
+	LoginKind             *string       `json:"loginKind,omitempty"`
+	CompanionRuntimeKind  *string       `json:"companionRuntimeKind,omitempty"`
 	CodexHome             string        `json:"codexHome"`
 	CodexConfigPath       string        `json:"codexConfigPath"`
 	CodexAuthPath         string        `json:"codexAuthPath"`
@@ -231,6 +242,8 @@ type RuntimeOverview struct {
 	Switching     RuntimeSwitching     `json:"switching"`
 	Compatibility RuntimeCompatibility `json:"compatibility"`
 }
+
+var errLoginNotSupported = errors.New("login not supported")
 
 type RuntimeRoots struct {
 	OpenclawHomeDir         string `json:"openclawHomeDir"`
@@ -333,6 +346,7 @@ type SupportSummary struct {
 	Discord     SupportDiscord     `json:"discord"`
 	Watchdog    SupportWatchdog    `json:"watchdog"`
 	Environment SupportEnvironment `json:"environment"`
+	Maintenance SupportMaintenance `json:"maintenance"`
 }
 
 type SupportGateway struct {
@@ -379,6 +393,37 @@ type SupportEnvironment struct {
 	RiskLevel          string   `json:"riskLevel"`
 	RiskySignals       []string `json:"riskySignals"`
 	Recommendation     string   `json:"recommendation"`
+}
+
+type SupportMaintenance struct {
+	CLIPath               *string               `json:"cliPath,omitempty"`
+	StateDir              string                `json:"stateDir"`
+	Config                SupportConfigCheck    `json:"config"`
+	GatewayService        SupportGatewayService `json:"gatewayService"`
+	DoctorCommand         string                `json:"doctorCommand"`
+	DoctorFixCommand      string                `json:"doctorFixCommand"`
+	GatewayInstallCommand string                `json:"gatewayInstallCommand"`
+}
+
+type SupportConfigCheck struct {
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	Valid  bool   `json:"valid"`
+	Detail string `json:"detail"`
+}
+
+type SupportGatewayService struct {
+	Installed         bool    `json:"installed"`
+	Status            string  `json:"status"`
+	ServiceFile       *string `json:"serviceFile,omitempty"`
+	CLIConfigPath     *string `json:"cliConfigPath,omitempty"`
+	ServiceConfigPath *string `json:"serviceConfigPath,omitempty"`
+	LogPath           *string `json:"logPath,omitempty"`
+	Command           *string `json:"command,omitempty"`
+	RuntimeStatus     *string `json:"runtimeStatus,omitempty"`
+	ProbeStatus       *string `json:"probeStatus,omitempty"`
+	Issue             *string `json:"issue,omitempty"`
+	Recommendation    *string `json:"recommendation,omitempty"`
 }
 
 type SupportRepairResult struct {
@@ -579,6 +624,7 @@ func newApp() (*App, error) {
 		executablePath:          exePath,
 		loginFlows:              map[string]*PendingLoginFlow{},
 		loginFlowIDsByState:     map[string]string{},
+		usageCache:              map[string]cachedUsageSnapshot{},
 	}
 	if app.authOpenMode == "" {
 		app.authOpenMode = "auto"
@@ -707,6 +753,10 @@ func (app *App) handleLoginProfile(w http.ResponseWriter, r *http.Request) {
 	profileName := r.PathValue("profileName")
 	flow, err := app.loginManagedProfile(profileName)
 	if err != nil {
+		if errors.Is(err, errLoginNotSupported) {
+			writeAPIMessage(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeAPIMessage(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -914,7 +964,7 @@ func (app *App) createManagedProfile(rawProfileName string) (ManagedProfileSnaps
 	if err != nil {
 		return ManagedProfileSnapshot{}, err
 	}
-	return app.readProfileSnapshot(profileName, state.Settings)
+	return app.readProfileSnapshot(profileName, state.Settings, false)
 }
 
 func (app *App) probeManagedProfile(rawProfileName string) (ManagedProfileSnapshot, error) {
@@ -926,7 +976,7 @@ func (app *App) probeManagedProfile(rawProfileName string) (ManagedProfileSnapsh
 	if err != nil {
 		return ManagedProfileSnapshot{}, err
 	}
-	return app.readProfileSnapshot(profileName, state.Settings)
+	return app.readProfileSnapshot(profileName, state.Settings, true)
 }
 
 func (app *App) loginManagedProfile(rawProfileName string) (LoginFlowSnapshot, error) {
@@ -939,6 +989,19 @@ func (app *App) loginManagedProfile(rawProfileName string) (LoginFlowSnapshot, e
 	}
 	if err := app.ensureProfileScaffold(profileName); err != nil {
 		return LoginFlowSnapshot{}, err
+	}
+	configPath, err := app.resolveConfigPath(profileName)
+	if err != nil {
+		return LoginFlowSnapshot{}, err
+	}
+	config := readOpenClawConfigSnapshot(configPath)
+	loginKind := profileLoginKind(config)
+	if loginKind == nil || *loginKind != "codex-oauth" {
+		if config.PrimaryProviderID != nil {
+			label := providerDisplayName(*config.PrimaryProviderID)
+			return LoginFlowSnapshot{}, fmt.Errorf("%w: %s 当前不支持内置登录，请在 OpenClaw 配置里完成认证", errLoginNotSupported, label)
+		}
+		return LoginFlowSnapshot{}, fmt.Errorf("%w: 当前 profile 不支持内置登录", errLoginNotSupported)
 	}
 
 	if flow := app.findPendingLoginFlow(profileName); flow != nil {
@@ -1475,13 +1538,31 @@ func (app *App) getManagerSummaryFromState(state NormalizedManagerState) (Manage
 		return ManagerSummary{}, err
 	}
 
-	snapshots := make([]ManagedProfileSnapshot, 0, len(profileNames))
-	for _, name := range profileNames {
-		snapshot, err := app.readProfileSnapshot(name, state.Settings)
-		if err != nil {
-			return ManagerSummary{}, err
+	type profileSnapshotResult struct {
+		index    int
+		snapshot ManagedProfileSnapshot
+		err      error
+	}
+
+	results := make(chan profileSnapshotResult, len(profileNames))
+	for idx, name := range profileNames {
+		go func(index int, profileName string) {
+			snapshot, err := app.readProfileSnapshot(profileName, state.Settings, false)
+			results <- profileSnapshotResult{
+				index:    index,
+				snapshot: snapshot,
+				err:      err,
+			}
+		}(idx, name)
+	}
+
+	snapshots := make([]ManagedProfileSnapshot, len(profileNames))
+	for range profileNames {
+		result := <-results
+		if result.err != nil {
+			return ManagerSummary{}, result.err
 		}
-		snapshots = append(snapshots, snapshot)
+		snapshots[result.index] = result.snapshot
 	}
 
 	recommended := pickRecommendedProfile(snapshots)
@@ -1718,6 +1799,35 @@ func resolveCodexConfigPath(profileName, codexHomeRoot string) string {
 	return filepath.Join(resolveCodexHome(profileName, codexHomeRoot), "config.toml")
 }
 
+func usageCacheKey(profileName string, tokens OAuthTokens) string {
+	accountID := strings.TrimSpace(tokens.AccountID)
+	if accountID == "" {
+		accountID = "unknown"
+	}
+	return profileName + "|" + accountID
+}
+
+func (app *App) loadCachedUsage(profileName string, tokens OAuthTokens, maxAge time.Duration) (UsageSnapshot, bool) {
+	key := usageCacheKey(profileName, tokens)
+	app.mu.Lock()
+	cached, ok := app.usageCache[key]
+	app.mu.Unlock()
+	if !ok || time.Since(cached.FetchedAt) > maxAge {
+		return UsageSnapshot{}, false
+	}
+	return cached.Quota, true
+}
+
+func (app *App) storeCachedUsage(profileName string, tokens OAuthTokens, quota UsageSnapshot) {
+	key := usageCacheKey(profileName, tokens)
+	app.mu.Lock()
+	app.usageCache[key] = cachedUsageSnapshot{
+		Quota:     quota,
+		FetchedAt: time.Now(),
+	}
+	app.mu.Unlock()
+}
+
 func readOpenClawConfigSnapshot(configPath string) OpenClawConfigSnapshot {
 	snapshot := OpenClawConfigSnapshot{
 		ConfiguredProviderIDs: []string{},
@@ -1814,6 +1924,35 @@ func authStoreHasProvider(store AuthStore, providerID string) bool {
 		}
 	}
 	return false
+}
+
+func profileLoginKind(config OpenClawConfigSnapshot) *string {
+	if config.PrimaryProviderID == nil {
+		if config.PrimaryModelID == nil && len(config.ConfiguredProviderIDs) == 0 {
+			return ptr("codex-oauth")
+		}
+		if containsString(config.ConfiguredProviderIDs, "openai-codex") {
+			return ptr("codex-oauth")
+		}
+		return nil
+	}
+	if *config.PrimaryProviderID == "openai-codex" {
+		return ptr("codex-oauth")
+	}
+	return nil
+}
+
+func companionRuntimeKind(config OpenClawConfigSnapshot, codex CodexMetadataSnapshot) *string {
+	if codex.HasCodexAuth || codex.HasCodexConfig {
+		return ptr("codex")
+	}
+	if containsString(config.ConfiguredProviderIDs, "openai-codex") {
+		return ptr("codex")
+	}
+	if config.PrimaryProviderID != nil && *config.PrimaryProviderID == "openai-codex" {
+		return ptr("codex")
+	}
+	return nil
 }
 
 func resolveAuthMode(config OpenClawConfigSnapshot) string {
@@ -2124,7 +2263,7 @@ func buildEmptyUsage() UsageSnapshot {
 	return UsageSnapshot{}
 }
 
-func (app *App) readProfileSnapshot(profileName string, settings ManagerSettings) (ManagedProfileSnapshot, error) {
+func (app *App) readProfileSnapshot(profileName string, settings ManagerSettings, forceUsageRefresh bool) (ManagedProfileSnapshot, error) {
 	stateDir, err := app.resolveStateDir(profileName)
 	if err != nil {
 		return ManagedProfileSnapshot{}, err
@@ -2142,6 +2281,8 @@ func (app *App) readProfileSnapshot(profileName string, settings ManagerSettings
 	hasAuthStore := pathExists(authStorePath)
 	config := readOpenClawConfigSnapshot(configPath)
 	authMode := resolveAuthMode(config)
+	loginKind := profileLoginKind(config)
+	companionKind := companionRuntimeKind(config, codex)
 
 	store := defaultAuthStore()
 	if hasAuthStore {
@@ -2164,6 +2305,9 @@ func (app *App) readProfileSnapshot(profileName string, settings ManagerSettings
 			PrimaryModelID:        config.PrimaryModelID,
 			ConfiguredProviderIDs: append([]string{}, config.ConfiguredProviderIDs...),
 			SupportsQuota:         false,
+			SupportsLogin:         loginKind != nil,
+			LoginKind:             loginKind,
+			CompanionRuntimeKind:  companionKind,
 			CodexHome:             codex.CodexHome,
 			CodexConfigPath:       codex.CodexConfigPath,
 			CodexAuthPath:         codex.CodexAuthPath,
@@ -2251,39 +2395,52 @@ func (app *App) readProfileSnapshot(profileName string, settings ManagerSettings
 
 	quota := buildEmptyUsage()
 	if !authBroken {
-		fetched, err := app.fetchCodexUsage(tokens)
-		if err != nil {
-			message := err.Error()
-			lastError = &message
-			if strings.Contains(message, "usage_failed 401") || strings.Contains(message, "usage_failed 403") {
-				if strings.TrimSpace(credential.Refresh) != "" {
-					refreshed, refreshErr := app.refreshCodexTokens(credential.Refresh)
-					if refreshErr != nil {
-						authBroken = true
-						lastError = ptr(refreshErr.Error())
-					} else {
-						tokens = refreshed
-						upsertOpenAICodexCredential(&store, *profileID, refreshed)
-						if err := app.saveAuthStore(profileName, store); err != nil {
-							return ManagedProfileSnapshot{}, err
-						}
-						if err := app.saveCodexAuth(profileName, refreshed); err != nil {
-							return ManagedProfileSnapshot{}, err
-						}
-						if retried, retryErr := app.fetchCodexUsage(tokens); retryErr != nil {
-							authBroken = true
-							lastError = ptr(retryErr.Error())
-						} else {
-							quota = retried
-							lastError = nil
-						}
-					}
-				} else {
-					authBroken = true
-				}
+		if !forceUsageRefresh {
+			if cached, ok := app.loadCachedUsage(profileName, tokens, usageCacheTTL); ok {
+				quota = cached
 			}
-		} else {
-			quota = fetched
+		}
+
+		if quota.FiveHour == nil && quota.Week == nil {
+			fetched, err := app.fetchCodexUsage(tokens)
+			if err != nil {
+				message := err.Error()
+				lastError = &message
+				if cached, ok := app.loadCachedUsage(profileName, tokens, staleUsageCacheTTL); ok {
+					quota = cached
+				}
+				if strings.Contains(message, "usage_failed 401") || strings.Contains(message, "usage_failed 403") {
+					if strings.TrimSpace(credential.Refresh) != "" {
+						refreshed, refreshErr := app.refreshCodexTokens(credential.Refresh)
+						if refreshErr != nil {
+							authBroken = true
+							lastError = ptr(refreshErr.Error())
+						} else {
+							tokens = refreshed
+							upsertOpenAICodexCredential(&store, *profileID, refreshed)
+							if err := app.saveAuthStore(profileName, store); err != nil {
+								return ManagedProfileSnapshot{}, err
+							}
+							if err := app.saveCodexAuth(profileName, refreshed); err != nil {
+								return ManagedProfileSnapshot{}, err
+							}
+							if retried, retryErr := app.fetchCodexUsage(tokens); retryErr != nil {
+								authBroken = true
+								lastError = ptr(retryErr.Error())
+							} else {
+								quota = retried
+								app.storeCachedUsage(profileName, tokens, retried)
+								lastError = nil
+							}
+						}
+					} else {
+						authBroken = true
+					}
+				}
+			} else {
+				quota = fetched
+				app.storeCachedUsage(profileName, tokens, fetched)
+			}
 		}
 	}
 
@@ -2307,6 +2464,9 @@ func (app *App) readProfileSnapshot(profileName string, settings ManagerSettings
 		PrimaryModelID:        config.PrimaryModelID,
 		ConfiguredProviderIDs: append([]string{}, config.ConfiguredProviderIDs...),
 		SupportsQuota:         true,
+		SupportsLogin:         loginKind != nil,
+		LoginKind:             loginKind,
+		CompanionRuntimeKind:  companionKind,
 		CodexHome:             codex.CodexHome,
 		CodexConfigPath:       codex.CodexConfigPath,
 		CodexAuthPath:         codex.CodexAuthPath,
@@ -2902,11 +3062,37 @@ func (app *App) expirePendingLoginFlowsLocked() {
 
 func (app *App) buildSupportSummary() (SupportSummary, error) {
 	now := time.Now()
-	gateway := app.getOpenClawStatus()
-	events := app.getRecentEvents()
-	watchdogState := readJSONFile(app.watchdogStatePath(), map[string]any{})
-	watchdogInstalled := pathExists(app.watchdogPlistPath())
-	environment := app.getEnvironmentSummary(now)
+	var gateway SupportGateway
+	var events []SupportLogEvent
+	var watchdogState map[string]any
+	var watchdogInstalled bool
+	var environment SupportEnvironment
+	var maintenance SupportMaintenance
+
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		gateway = app.getOpenClawStatus()
+	}()
+	go func() {
+		defer wg.Done()
+		events = app.getRecentEvents()
+	}()
+	go func() {
+		defer wg.Done()
+		watchdogState = readJSONFile(app.watchdogStatePath(), map[string]any{})
+		watchdogInstalled = pathExists(app.watchdogPlistPath())
+	}()
+	go func() {
+		defer wg.Done()
+		environment = app.getEnvironmentSummary(now)
+	}()
+	go func() {
+		defer wg.Done()
+		maintenance = app.getSupportMaintenance()
+	}()
+	wg.Wait()
 
 	disconnect15 := 0
 	disconnect60 := 0
@@ -3006,7 +3192,113 @@ func (app *App) buildSupportSummary() (SupportSummary, error) {
 			StatusLine:        statusLine,
 		},
 		Environment: environment,
+		Maintenance: maintenance,
 	}, nil
+}
+
+func (app *App) getSupportMaintenance() SupportMaintenance {
+	openclawBin := app.resolveOpenClawBin()
+	var config SupportConfigCheck
+	var gatewayService SupportGatewayService
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		config = app.inspectOpenClawConfig(openclawBin)
+	}()
+	go func() {
+		defer wg.Done()
+		gatewayService = app.inspectGatewayService(openclawBin)
+	}()
+	wg.Wait()
+	return SupportMaintenance{
+		CLIPath:               nullableString(openclawBin),
+		StateDir:              app.defaultOpenClawState,
+		Config:                config,
+		GatewayService:        gatewayService,
+		DoctorCommand:         "openclaw doctor --non-interactive",
+		DoctorFixCommand:      "openclaw doctor --fix --yes --non-interactive",
+		GatewayInstallCommand: "openclaw gateway install --force",
+	}
+}
+
+func (app *App) inspectOpenClawConfig(openclawBin string) SupportConfigCheck {
+	defaultPath := filepath.Join(app.defaultOpenClawState, "openclaw.json")
+	result := runCommand(openclawBin, []string{"config", "validate"}, commandTimeout)
+	if result.OK {
+		reportedPath := strings.TrimSpace(prefixedLine(result.Stdout, "Config valid:"))
+		if reportedPath == "" {
+			reportedPath = defaultPath
+		}
+		resolvedPath := expandUserPath(reportedPath, app.homeDir)
+		return SupportConfigCheck{
+			Path:   resolvedPath,
+			Exists: pathExists(resolvedPath),
+			Valid:  true,
+			Detail: "配置有效",
+		}
+	}
+
+	output := strings.TrimSpace(derefString(cleanOutput(result.Stdout, result.Stderr)))
+	if output == "" {
+		output = "配置校验失败"
+	}
+	return SupportConfigCheck{
+		Path:   defaultPath,
+		Exists: pathExists(defaultPath),
+		Valid:  false,
+		Detail: output,
+	}
+}
+
+func (app *App) inspectGatewayService(openclawBin string) SupportGatewayService {
+	result := runCommand(openclawBin, []string{"gateway", "status", "--deep"}, commandTimeout)
+	if !result.OK {
+		return SupportGatewayService{
+			Installed: pathExists(app.gatewayPlistPath()),
+			Status:    "读取失败",
+			Issue:     cleanOutput(result.Stdout, result.Stderr),
+		}
+	}
+
+	text := strings.TrimSpace(strings.Join(filterNonEmpty([]string{result.Stdout, result.Stderr}), "\n"))
+	status := strings.TrimSpace(prefixedLine(text, "Service:"))
+	if status == "" {
+		status = "未安装"
+	}
+	serviceFile := nullableString(expandUserPath(prefixedLine(text, "Service file:"), app.homeDir))
+	cliConfigPath := nullableString(expandUserPath(prefixedLine(text, "Config (cli):"), app.homeDir))
+	serviceConfigPath := nullableString(expandUserPath(prefixedLine(text, "Config (service):"), app.homeDir))
+	logPath := nullableString(expandUserPath(prefixedLine(text, "File logs:"), app.homeDir))
+	command := nullableString(prefixedLine(text, "Command:"))
+	runtimeStatus := nullableString(prefixedLine(text, "Runtime:"))
+	probeStatus := nullableString(prefixedLine(text, "RPC probe:"))
+	issue := nullableString(prefixedLine(text, "Service config issue:"))
+	recommendation := nullableString(prefixedLine(text, "Recommendation:"))
+	installed := pathExists(app.gatewayPlistPath()) || serviceFile != nil
+
+	if issue == nil {
+		switch {
+		case strings.Contains(strings.ToLower(text), "service not installed"):
+			issue = ptr("OpenClaw Gateway 服务未安装。")
+		case strings.Contains(strings.ToLower(text), "config is invalid"):
+			issue = ptr("OpenClaw 配置无效，需先修复配置。")
+		}
+	}
+
+	return SupportGatewayService{
+		Installed:         installed,
+		Status:            status,
+		ServiceFile:       serviceFile,
+		CLIConfigPath:     cliConfigPath,
+		ServiceConfigPath: serviceConfigPath,
+		LogPath:           logPath,
+		Command:           command,
+		RuntimeStatus:     runtimeStatus,
+		ProbeStatus:       probeStatus,
+		Issue:             issue,
+		Recommendation:    recommendation,
+	}
 }
 
 func (app *App) performSupportRepair(action string) (SupportRepairResult, error) {
@@ -3018,22 +3310,7 @@ func (app *App) performSupportRepair(action string) (SupportRepairResult, error)
 	if err != nil {
 		return SupportRepairResult{}, err
 	}
-	output := cleanOutput(result.Stdout, result.Stderr)
-	message := "操作执行失败"
-	if result.OK {
-		switch action {
-		case "run_watchdog_check":
-			message = "一键修复已执行"
-		case "restart_gateway":
-			message = "OpenClaw 服务已重启"
-		case "reinstall_watchdog":
-			message = "稳定守护已重新部署"
-		default:
-			message = "日志已打开"
-		}
-	} else if output != nil {
-		message = *output
-	}
+	message, output := summarizeSupportRepair(action, result, summary)
 	return SupportRepairResult{
 		OK:      result.OK,
 		Action:  action,
@@ -3043,8 +3320,204 @@ func (app *App) performSupportRepair(action string) (SupportRepairResult, error)
 	}, nil
 }
 
-func (app *App) performRepairAction(action string) (CommandResult, error) {
+func summarizeSupportRepair(action string, result CommandResult, summary SupportSummary) (string, *string) {
+	rawOutput := cleanOutput(result.Stdout, result.Stderr)
+	if !result.OK {
+		return supportRepairFailureMessage(action), rawOutput
+	}
+
 	switch action {
+	case "validate_config":
+		message := "OpenClaw 配置校验通过"
+		if !summary.Maintenance.Config.Valid {
+			message = "OpenClaw 配置仍有问题"
+		}
+		return message, composeSupportRepairOutput([]string{
+			"配置文件: " + summary.Maintenance.Config.Path,
+			"当前状态: " + boolLabel(summary.Maintenance.Config.Valid, "有效", "仍有问题"),
+			summary.Maintenance.Config.Detail,
+			commandExcerptLabel(rawOutput),
+		})
+	case "run_openclaw_doctor":
+		return "OpenClaw 官方体检已完成", composeSupportRepairOutput([]string{
+			supportRepairStatusSummary(summary),
+			"建议: " + primarySupportRecommendation(summary),
+			commandExcerptLabel(rawOutput),
+		})
+	case "run_openclaw_doctor_fix":
+		message := "OpenClaw 官方修复已执行"
+		if summary.Maintenance.Config.Valid && strings.TrimSpace(derefString(summary.Maintenance.GatewayService.Issue)) == "" && summary.Gateway.Reachable {
+			message = "OpenClaw 官方修复后状态正常"
+		}
+		return message, composeSupportRepairOutput([]string{
+			supportRepairStatusSummary(summary),
+			"建议: " + primarySupportRecommendation(summary),
+			commandExcerptLabel(rawOutput),
+		})
+	case "reinstall_gateway_service":
+		service := summary.Maintenance.GatewayService
+		message := "OpenClaw Gateway 服务已重装"
+		if issue := strings.TrimSpace(derefString(service.Issue)); issue != "" {
+			message = "Gateway 服务已重装，但仍需继续处理"
+		}
+		return message, composeSupportRepairOutput([]string{
+			"服务状态: " + firstNonEmpty(derefString(service.RuntimeStatus), service.Status, "未提供"),
+			"Gateway: " + boolLabel(summary.Gateway.Reachable, "可达", "不可达"),
+			firstNonEmpty(derefString(service.Issue), derefString(service.Recommendation)),
+			commandExcerptLabel(rawOutput),
+		})
+	case "run_watchdog_check":
+		return "一键修复已执行", composeSupportRepairOutput([]string{
+			"守护状态: " + summary.Watchdog.StatusLine,
+			"Gateway: " + boolLabel(summary.Gateway.Reachable, "可达", "不可达"),
+			"建议: " + primarySupportRecommendation(summary),
+			commandExcerptLabel(rawOutput),
+		})
+	case "restart_gateway":
+		return "OpenClaw 服务已重启", composeSupportRepairOutput([]string{
+			"Gateway: " + boolLabel(summary.Gateway.Reachable, "可达", "不可达"),
+			supportRepairStatusSummary(summary),
+			commandExcerptLabel(rawOutput),
+		})
+	case "reinstall_watchdog":
+		return "稳定守护已重新部署", composeSupportRepairOutput([]string{
+			"守护状态: " + summary.Watchdog.StatusLine,
+			"监控目录: " + firstNonEmpty(derefString(summary.Watchdog.MonitoredStateDir), summary.Maintenance.StateDir),
+			"建议: " + primarySupportRecommendation(summary),
+			commandExcerptLabel(rawOutput),
+		})
+	default:
+		return "日志已打开", rawOutput
+	}
+}
+
+func supportRepairFailureMessage(action string) string {
+	switch action {
+	case "validate_config":
+		return "OpenClaw 配置校验失败"
+	case "run_openclaw_doctor":
+		return "OpenClaw 官方体检失败"
+	case "run_openclaw_doctor_fix":
+		return "OpenClaw 官方修复失败"
+	case "reinstall_gateway_service":
+		return "Gateway 服务重装失败"
+	case "run_watchdog_check":
+		return "一键修复失败"
+	case "restart_gateway":
+		return "OpenClaw 服务重启失败"
+	case "reinstall_watchdog":
+		return "稳定守护部署失败"
+	default:
+		return "操作执行失败"
+	}
+}
+
+func supportRepairStatusSummary(summary SupportSummary) string {
+	parts := []string{
+		"配置 " + boolLabel(summary.Maintenance.Config.Valid, "有效", "异常"),
+		"Gateway 服务 " + boolLabel(strings.TrimSpace(derefString(summary.Maintenance.GatewayService.Issue)) == "", "正常", "需维护"),
+		"Gateway " + boolLabel(summary.Gateway.Reachable, "可达", "不可达"),
+	}
+	if summary.Discord.Status != "" {
+		parts = append(parts, "Discord "+summary.Discord.Status)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func primarySupportRecommendation(summary SupportSummary) string {
+	if !summary.Maintenance.Config.Valid {
+		return firstNonEmpty(summary.Maintenance.Config.Detail, "先修复 OpenClaw 配置。")
+	}
+	if issue := strings.TrimSpace(derefString(summary.Maintenance.GatewayService.Issue)); issue != "" {
+		return firstNonEmpty(derefString(summary.Maintenance.GatewayService.Recommendation), issue)
+	}
+	if !summary.Gateway.Reachable {
+		return explainGatewayFailure(summary.Gateway.Error)
+	}
+	if summary.Discord.Status == "offline" || summary.Discord.Status == "unstable" {
+		return firstNonEmpty(summary.Discord.Recommendation, "先执行一轮修复，再观察 Discord 是否恢复。")
+	}
+	if summary.Environment.RiskLevel == "high" || summary.Environment.RiskLevel == "watch" {
+		return firstNonEmpty(summary.Environment.Recommendation, "先排除 VPN、代理和睡眠恢复带来的环境波动。")
+	}
+	return "当前没有明显阻塞，保持自动切换和稳定守护即可。"
+}
+
+func commandExcerptLabel(output *string) string {
+	excerpt := compactCommandExcerpt(output, 4, 420)
+	if excerpt == "" {
+		return ""
+	}
+	return "命令输出摘要:\n" + excerpt
+}
+
+func compactCommandExcerpt(output *string, maxLines int, maxChars int) string {
+	text := strings.TrimSpace(derefString(output))
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	selected := make([]string, 0, maxLines)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "deprecationwarning") ||
+			strings.Contains(lower, "trace-deprecation") ||
+			strings.Contains(lower, "the `punycode` module is deprecated") {
+			continue
+		}
+		selected = append(selected, line)
+		if len(selected) >= maxLines {
+			break
+		}
+	}
+	if len(selected) == 0 {
+		return ""
+	}
+	snippet := strings.Join(selected, "\n")
+	if len(snippet) > maxChars {
+		snippet = snippet[:maxChars] + "..."
+	}
+	return snippet
+}
+
+func composeSupportRepairOutput(lines []string) *string {
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	text := strings.Join(filtered, "\n")
+	return &text
+}
+
+func boolLabel(value bool, yes string, no string) string {
+	if value {
+		return yes
+	}
+	return no
+}
+
+func (app *App) performRepairAction(action string) (CommandResult, error) {
+	openclawBin := app.resolveOpenClawBin()
+	switch action {
+	case "validate_config":
+		return runCommand(openclawBin, []string{"config", "validate"}, commandTimeout), nil
+	case "run_openclaw_doctor":
+		return runCommand(openclawBin, []string{"doctor", "--non-interactive"}, 90*time.Second), nil
+	case "run_openclaw_doctor_fix":
+		return runCommand(openclawBin, []string{"doctor", "--fix", "--yes", "--non-interactive"}, 120*time.Second), nil
+	case "reinstall_gateway_service":
+		return runCommand(openclawBin, []string{"gateway", "install", "--force"}, 90*time.Second), nil
 	case "run_watchdog_check":
 		watchdogPath, err := app.resolveRuntimeBinary("openclaw-watchdog")
 		if err != nil {
@@ -3170,11 +3643,35 @@ func (app *App) getRecentEvents() []SupportLogEvent {
 }
 
 func (app *App) getEnvironmentSummary(now time.Time) SupportEnvironment {
-	routeResult := runCommand("route", []string{"-n", "get", "default"}, 8*time.Second)
-	vpnResult := runCommand("scutil", []string{"--nc", "list"}, 8*time.Second)
-	proxyResult := runCommand("scutil", []string{"--proxy"}, 8*time.Second)
-	interfacesResult := runCommand("ifconfig", []string{"-l"}, 8*time.Second)
-	sleepResult := runCommand("bash", []string{"-lc", "pmset -g log | awk 'match($0,/^[0-9-]+ [0-9:]+ [+-][0-9]{4} (Sleep|Wake|DarkWake)[[:space:]]+\\t/){print}' | tail -n 80"}, 15*time.Second)
+	var routeResult CommandResult
+	var vpnResult CommandResult
+	var proxyResult CommandResult
+	var interfacesResult CommandResult
+	var sleepResult CommandResult
+
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		routeResult = runCommand("route", []string{"-n", "get", "default"}, 8*time.Second)
+	}()
+	go func() {
+		defer wg.Done()
+		vpnResult = runCommand("scutil", []string{"--nc", "list"}, 8*time.Second)
+	}()
+	go func() {
+		defer wg.Done()
+		proxyResult = runCommand("scutil", []string{"--proxy"}, 8*time.Second)
+	}()
+	go func() {
+		defer wg.Done()
+		interfacesResult = runCommand("ifconfig", []string{"-l"}, 8*time.Second)
+	}()
+	go func() {
+		defer wg.Done()
+		sleepResult = runCommand("bash", []string{"-lc", "pmset -g log | awk 'match($0,/^[0-9-]+ [0-9:]+ [+-][0-9]{4} (Sleep|Wake|DarkWake)[[:space:]]+\\t/){print}' | tail -n 80"}, 15*time.Second)
+	}()
+	wg.Wait()
 
 	primaryInterface := firstRegexGroup(routeResult.Stdout, `interface:\s+(\S+)`)
 	gatewayAddress := firstRegexGroup(routeResult.Stdout, `gateway:\s+(\S+)`)
@@ -3473,12 +3970,8 @@ func runCommand(command string, args []string, timeout time.Duration) CommandRes
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, command, args...)
-	if cmd.Env == nil {
-		cmd.Env = os.Environ()
-	}
-	if !envContainsPath(cmd.Env) {
-		cmd.Env = append(cmd.Env, "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
-	}
+	cmd.Env = normalizeCommandEnv(os.Environ())
+	cmd.Dir = stableCommandDir()
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -3506,6 +3999,79 @@ func runCommand(command string, args []string, timeout time.Duration) CommandRes
 		result.Code = &code
 	}
 	return result
+}
+
+func normalizeCommandEnv(env []string) []string {
+	if len(env) == 0 {
+		env = os.Environ()
+	}
+	normalized := make([]string, 0, len(env)+1)
+	pathSet := false
+	for _, item := range env {
+		if strings.HasPrefix(item, "PATH=") {
+			normalized = append(normalized, "PATH="+defaultCommandSearchPath(strings.TrimPrefix(item, "PATH=")))
+			pathSet = true
+			continue
+		}
+		normalized = append(normalized, item)
+	}
+	if !pathSet {
+		normalized = append(normalized, "PATH="+defaultCommandSearchPath(""))
+	}
+	return normalized
+}
+
+func defaultCommandSearchPath(existing string) string {
+	entries := make([]string, 0, 16)
+	homeDir := stableCommandDir()
+	if homeDir != "" && homeDir != "/" {
+		entries = append(entries, filepath.Join(homeDir, ".local", "bin"))
+	}
+	entries = append(entries,
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin",
+		"/sbin",
+	)
+	if existing != "" {
+		entries = append(entries, strings.Split(existing, ":")...)
+	}
+
+	seen := map[string]struct{}{}
+	merged := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		merged = append(merged, entry)
+	}
+	return strings.Join(merged, ":")
+}
+
+func stableCommandDir() string {
+	candidates := []string{
+		strings.TrimSpace(os.Getenv("OPENCLAW_HOME_DIR")),
+		strings.TrimSpace(os.Getenv("HOME")),
+	}
+	for _, candidate := range candidates {
+		if candidate != "" && pathExists(candidate) {
+			return candidate
+		}
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" && pathExists(homeDir) {
+		return homeDir
+	}
+	if cwd, err := os.Getwd(); err == nil && cwd != "" && pathExists(cwd) {
+		return cwd
+	}
+	return "/"
 }
 
 func envContainsPath(env []string) bool {
@@ -3608,10 +4174,33 @@ func cleanOutput(stdout, stderr string) *string {
 	return &text
 }
 
+func prefixedLine(text, prefix string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+
+func expandUserPath(value, homeDir string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "~/") && homeDir != "" {
+		return filepath.Join(homeDir, value[2:])
+	}
+	return value
+}
+
 func explainGatewayFailure(errorText *string) string {
 	text := strings.TrimSpace(derefString(errorText))
 	normalized := strings.ToLower(text)
 	switch {
+	case strings.Contains(normalized, "uv_cwd") || strings.Contains(normalized, "getcwd") || strings.Contains(normalized, "cannot access parent directories"):
+		return "当前运行中的服务工作目录已经失效。通常是 app 被替换后旧进程还在跑，重启服务或重开 app 即可恢复。"
 	case strings.Contains(normalized, "enoent") && strings.Contains(normalized, "openclaw"):
 		return "未找到 OpenClaw CLI。先确认已安装，并保证环境包含 ~/.local/bin/openclaw。"
 	case strings.Contains(normalized, "invalid json"):

@@ -38,6 +38,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private var lastMenuBarError: String?
     private var isRestarting = false
 
+    private func requireMainThread() {
+        precondition(Thread.isMainThread, "AppKit operation must run on the main thread")
+    }
+
+    @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         configureStoreActions()
@@ -62,19 +67,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         false
     }
 
+    @MainActor
     func applicationWillTerminate(_ notification: Notification) {
         stopStatusItemRefreshLoop()
         store.stop()
         terminateProcesses()
     }
 
+    @MainActor
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        MainActor.assumeIsolated {
-            presentMainWindow()
-        }
+        presentMainWindow()
         return true
     }
 
+    @MainActor
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         sender.orderOut(nil)
         return false
@@ -83,74 +89,119 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private func configureStoreActions() {
         store.configure(actions: NativeAppActions(
             refreshAll: { [weak self] silent in
-                self?.refreshManagerData(showErrorAlerts: false, silentForStore: silent)
+                Task { @MainActor [weak self] in
+                    self?.refreshManagerData(showErrorAlerts: false, silentForStore: silent)
+                }
             },
             pollLoginFlow: { [weak self] flowId in
-                self?.pollLoginFlow(flowId)
+                Task { @MainActor [weak self] in
+                    self?.pollLoginFlow(flowId)
+                }
             },
             createProfile: { [weak self] profileName in
-                self?.createProfile(profileName)
+                Task { @MainActor [weak self] in
+                    self?.createProfile(profileName)
+                }
             },
             loginProfile: { [weak self] profileName in
-                self?.loginProfile(profileName)
+                Task { @MainActor [weak self] in
+                    self?.loginProfile(profileName)
+                }
             },
             probeProfile: { [weak self] profileName in
-                self?.probeProfile(profileName)
+                Task { @MainActor [weak self] in
+                    self?.probeProfile(profileName)
+                }
             },
             activateProfile: { [weak self] profileName in
-                self?.activateProfile(profileName)
+                Task { @MainActor [weak self] in
+                    self?.activateProfile(profileName)
+                }
             },
             activateRecommended: { [weak self] in
-                self?.activateRecommended()
+                Task { @MainActor [weak self] in
+                    self?.activateRecommended()
+                }
             },
             saveAutomation: { [weak self] patch in
-                self?.saveAutomation(patch)
+                Task { @MainActor [weak self] in
+                    self?.saveAutomation(patch)
+                }
             },
             runAutomationTick: { [weak self] in
-                self?.runAutomationTick()
+                Task { @MainActor [weak self] in
+                    self?.runAutomationTick()
+                }
             },
             selectOpenClawRoot: { [weak self] in
-                self?.selectOpenClawRoot(nil)
+                Task { @MainActor [weak self] in
+                    self?.selectOpenClawRoot(nil)
+                }
             },
             resetOpenClawRoot: { [weak self] in
-                self?.resetOpenClawRoot(nil)
+                Task { @MainActor [weak self] in
+                    self?.resetOpenClawRoot(nil)
+                }
             },
             selectCodexRoot: { [weak self] in
-                self?.selectCodexRoot(nil)
+                Task { @MainActor [weak self] in
+                    self?.selectCodexRoot(nil)
+                }
             },
             resetCodexRoot: { [weak self] in
-                self?.resetCodexRoot(nil)
+                Task { @MainActor [weak self] in
+                    self?.resetCodexRoot(nil)
+                }
             },
             openSettingsFile: { [weak self] in
-                self?.openSettingsFile(nil)
+                Task { @MainActor [weak self] in
+                    self?.openSettingsFile(nil)
+                }
             },
             openAppSupportDirectory: { [weak self] in
-                self?.openAppSupportDirectory(nil)
+                Task { @MainActor [weak self] in
+                    self?.openAppSupportDirectory(nil)
+                }
             },
             openManagerStateDirectory: { [weak self] in
-                self?.openManagerStateDirectory(nil)
+                Task { @MainActor [weak self] in
+                    self?.openManagerStateDirectory(nil)
+                }
             },
             restartServices: { [weak self] in
-                self?.restartServices(nil)
+                Task { @MainActor [weak self] in
+                    self?.restartServices(nil)
+                }
             },
             supportRepair: { [weak self] action in
-                self?.runSupportRepair(action)
+                Task { @MainActor [weak self] in
+                    self?.runSupportRepair(action)
+                }
             },
             openURL: { url in
-                NSWorkspace.shared.open(url)
+                Task { @MainActor in
+                    NSWorkspace.shared.open(url)
+                }
             },
             openGatewayLog: { [weak self] in
-                self?.openGatewayLog(nil)
+                Task { @MainActor [weak self] in
+                    self?.openGatewayLog(nil)
+                }
             },
             openWatchdogLog: { [weak self] in
-                self?.openWatchdogLog(nil)
+                Task { @MainActor [weak self] in
+                    self?.openWatchdogLog(nil)
+                }
             },
             openWatchdogStateDirectory: { [weak self] in
-                self?.openWatchdogStateDirectory(nil)
+                Task { @MainActor [weak self] in
+                    self?.openWatchdogStateDirectory(nil)
+                }
             }
         ))
     }
 
+    @MainActor
     private func initializeEnvironment() throws {
         let appSupport = try ensureApplicationSupportDirectory()
         appSupportURL = appSupport
@@ -171,6 +222,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return target
     }
 
+    @MainActor
     private func loadOrCreateSettings() throws -> RuntimeConfig {
         guard let settingsURL else {
             throw NSError(domain: appName, code: 1, userInfo: [NSLocalizedDescriptionKey: "settings.json 路径不可用"])
@@ -196,6 +248,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return config
     }
 
+    @MainActor
     private func persistSettings(_ config: RuntimeConfig) throws {
         guard let settingsURL else {
             throw NSError(domain: appName, code: 2, userInfo: [NSLocalizedDescriptionKey: "settings.json 路径不可用"])
@@ -229,6 +282,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         )
     }
 
+    @MainActor
     private func pushLocalSnapshotToStore() {
         let watchdog = collectWatchdogSummary()
         let snapshot = NativeLocalSnapshot(
@@ -245,28 +299,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         store.applyLocalSnapshot(snapshot)
     }
 
+    @MainActor
     private func configureStatusItem() {
-        MainActor.assumeIsolated {
-            if statusItem == nil {
-                statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-            }
-
-            if let button = statusItem?.button {
-                let symbolName = latestManagerSummary?.automation.enabled == true
-                    ? "arrow.triangle.2.circlepath.circle.fill"
-                    : "pause.circle"
-                button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: appName)
-                button.image?.isTemplate = true
-                button.imagePosition = .imageLeading
-                button.title = " \(menuBarButtonTitle())"
-                button.toolTip = menuBarTooltip()
-                button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            }
-
-            rebuildStatusItemMenu()
+        requireMainThread()
+        if statusItem == nil {
+            statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         }
+
+        if let button = statusItem?.button {
+            let symbolName = latestManagerSummary?.automation.enabled == true
+                ? "arrow.triangle.2.circlepath.circle.fill"
+                : "pause.circle"
+            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: appName)
+            button.image?.isTemplate = true
+            button.imagePosition = .imageLeading
+            button.title = " \(menuBarButtonTitle())"
+            button.toolTip = menuBarTooltip()
+            button.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        }
+
+        rebuildStatusItemMenu()
     }
 
+    @MainActor
     private func startStatusItemRefreshLoop() {
         stopStatusItemRefreshLoop()
         statusItemRefreshTimer = Timer.scheduledTimer(
@@ -281,10 +336,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
+    @MainActor
     @objc private func handleStatusItemRefreshTimer(_ timer: Timer) {
         refreshManagerData()
     }
 
+    @MainActor
     private func stopStatusItemRefreshLoop() {
         statusItemRefreshTimer?.invalidate()
         statusItemRefreshTimer = nil
@@ -337,114 +394,115 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return item
     }
 
+    @MainActor
     private func rebuildStatusItemMenu() {
-        MainActor.assumeIsolated {
-            guard let statusItem else { return }
+        requireMainThread()
+        guard let statusItem else { return }
 
-            let watchdog = collectWatchdogSummary()
-            let menu = NSMenu()
-            menu.autoenablesItems = false
+        let watchdog = collectWatchdogSummary()
+        let menu = NSMenu()
+        menu.autoenablesItems = false
 
-            menu.addItem(makeStatusInfoItem(appName))
+        menu.addItem(makeStatusInfoItem(appName))
 
-            if let summary = latestManagerSummary {
-                let activeLabel = activeMenuBarProfile()?.accountEmail ?? summary.activeProfileName ?? "未激活"
-                menu.addItem(makeStatusInfoItem("当前: \(summary.activeProfileName ?? "未激活")"))
-                menu.addItem(makeStatusInfoItem("账号: \(activeLabel)"))
-                menu.addItem(makeStatusInfoItem("推荐: \(summary.recommendedProfileName ?? "无")"))
-                menu.addItem(makeStatusInfoItem("自动切换: \(summary.automation.enabled ? "已开启" : "已关闭")"))
-                menu.addItem(makeStatusInfoItem("已发现 profile: \(summary.profiles.count)"))
-                if let reason = summary.automation.lastAutoActivationReason, !reason.isEmpty {
-                    menu.addItem(makeStatusInfoItem("最近结果: \(reason)"))
-                }
-            } else if let lastMenuBarError, !lastMenuBarError.isEmpty {
-                menu.addItem(makeStatusInfoItem("状态读取失败"))
-                menu.addItem(makeStatusInfoItem(lastMenuBarError))
-            } else {
-                menu.addItem(makeStatusInfoItem("正在连接本地服务..."))
+        if let summary = latestManagerSummary {
+            let activeLabel = activeMenuBarProfile()?.accountEmail ?? summary.activeProfileName ?? "未激活"
+            menu.addItem(makeStatusInfoItem("当前: \(summary.activeProfileName ?? "未激活")"))
+            menu.addItem(makeStatusInfoItem("账号: \(activeLabel)"))
+            menu.addItem(makeStatusInfoItem("推荐: \(summary.recommendedProfileName ?? "无")"))
+            menu.addItem(makeStatusInfoItem("自动切换: \(summary.automation.enabled ? "已开启" : "已关闭")"))
+            menu.addItem(makeStatusInfoItem("已发现 profile: \(summary.profiles.count)"))
+            if let reason = summary.automation.lastAutoActivationReason, !reason.isEmpty {
+                menu.addItem(makeStatusInfoItem("最近结果: \(reason)"))
             }
-
-            menu.addItem(.separator())
-
-            let showWindowItem = menu.addItem(withTitle: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "")
-            showWindowItem.target = self
-
-            let recommendedItem = menu.addItem(withTitle: "切到推荐账号", action: #selector(activateRecommendedFromMenuBar(_:)), keyEquivalent: "")
-            recommendedItem.target = self
-            recommendedItem.isEnabled = latestManagerSummary?.recommendedProfileName != nil
-
-            if let summary = latestManagerSummary, !summary.profiles.isEmpty {
-                let quickSwitchItem = NSMenuItem()
-                menu.addItem(quickSwitchItem)
-
-                let quickSwitchMenu = NSMenu(title: "快速切换")
-                quickSwitchItem.submenu = quickSwitchMenu
-
-                let sortedProfiles = summary.profiles.sorted { left, right in
-                    let leftRank = left.isActive ? 0 : left.isRecommended ? 1 : 2
-                    let rightRank = right.isActive ? 0 : right.isRecommended ? 1 : 2
-                    if leftRank != rightRank {
-                        return leftRank < rightRank
-                    }
-                    return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
-                }
-
-                for profile in sortedProfiles {
-                    let email = profile.accountEmail ?? "未登录"
-                    let prefix = profile.isActive ? "当前" : profile.isRecommended ? "推荐" : "切换"
-                    let item = quickSwitchMenu.addItem(
-                        withTitle: "\(prefix) · \(profile.name) · \(email)",
-                        action: #selector(activateProfileFromMenuBar(_:)),
-                        keyEquivalent: ""
-                    )
-                    item.target = self
-                    item.representedObject = profile.name
-                    item.isEnabled = !profile.isActive
-                }
-            }
-
-            let automationEnabled = latestManagerSummary?.automation.enabled ?? false
-            let toggleTitle = automationEnabled ? "关闭自动切换" : "开启自动切换"
-            let toggleItem = menu.addItem(withTitle: toggleTitle, action: #selector(toggleAutomationFromMenuBar(_:)), keyEquivalent: "")
-            toggleItem.target = self
-            toggleItem.isEnabled = latestManagerSummary != nil
-
-            let tickItem = menu.addItem(withTitle: "立即执行一轮探测", action: #selector(runAutomationTickFromMenuBar(_:)), keyEquivalent: "")
-            tickItem.target = self
-            tickItem.isEnabled = latestManagerSummary != nil
-
-            let refreshItem = menu.addItem(withTitle: "刷新菜单状态", action: #selector(refreshMenuBarNow(_:)), keyEquivalent: "")
-            refreshItem.target = self
-
-            menu.addItem(.separator())
-            menu.addItem(makeStatusInfoItem("稳定守护: \(watchdog.statusLine)"))
-
-            let restartItem = menu.addItem(withTitle: "重启服务并刷新窗口", action: #selector(restartServices(_:)), keyEquivalent: "")
-            restartItem.target = self
-
-            menu.addItem(.separator())
-            let quitItem = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-            quitItem.target = NSApp
-
-            statusItem.menu = menu
-            configureStatusItemButtonOnly()
+        } else if let lastMenuBarError, !lastMenuBarError.isEmpty {
+            menu.addItem(makeStatusInfoItem("状态读取失败"))
+            menu.addItem(makeStatusInfoItem(lastMenuBarError))
+        } else {
+            menu.addItem(makeStatusInfoItem("正在连接本地服务..."))
         }
+
+        menu.addItem(.separator())
+
+        let showWindowItem = menu.addItem(withTitle: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "")
+        showWindowItem.target = self
+
+        let recommendedItem = menu.addItem(withTitle: "切到推荐账号", action: #selector(activateRecommendedFromMenuBar(_:)), keyEquivalent: "")
+        recommendedItem.target = self
+        recommendedItem.isEnabled = latestManagerSummary?.recommendedProfileName != nil
+
+        if let summary = latestManagerSummary, !summary.profiles.isEmpty {
+            let quickSwitchItem = NSMenuItem()
+            menu.addItem(quickSwitchItem)
+
+            let quickSwitchMenu = NSMenu(title: "快速切换")
+            quickSwitchItem.submenu = quickSwitchMenu
+
+            let sortedProfiles = summary.profiles.sorted { left, right in
+                let leftRank = left.isActive ? 0 : left.isRecommended ? 1 : 2
+                let rightRank = right.isActive ? 0 : right.isRecommended ? 1 : 2
+                if leftRank != rightRank {
+                    return leftRank < rightRank
+                }
+                return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
+            }
+
+            for profile in sortedProfiles {
+                let email = profile.accountEmail ?? "未登录"
+                let prefix = profile.isActive ? "当前" : profile.isRecommended ? "推荐" : "切换"
+                let item = quickSwitchMenu.addItem(
+                    withTitle: "\(prefix) · \(profile.name) · \(email)",
+                    action: #selector(activateProfileFromMenuBar(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = profile.name
+                item.isEnabled = !profile.isActive
+            }
+        }
+
+        let automationEnabled = latestManagerSummary?.automation.enabled ?? false
+        let toggleTitle = automationEnabled ? "关闭自动切换" : "开启自动切换"
+        let toggleItem = menu.addItem(withTitle: toggleTitle, action: #selector(toggleAutomationFromMenuBar(_:)), keyEquivalent: "")
+        toggleItem.target = self
+        toggleItem.isEnabled = latestManagerSummary != nil
+
+        let tickItem = menu.addItem(withTitle: "立即执行一轮探测", action: #selector(runAutomationTickFromMenuBar(_:)), keyEquivalent: "")
+        tickItem.target = self
+        tickItem.isEnabled = latestManagerSummary != nil
+
+        let refreshItem = menu.addItem(withTitle: "刷新菜单状态", action: #selector(refreshMenuBarNow(_:)), keyEquivalent: "")
+        refreshItem.target = self
+
+        menu.addItem(.separator())
+        menu.addItem(makeStatusInfoItem("稳定守护: \(watchdog.statusLine)"))
+
+        let restartItem = menu.addItem(withTitle: "重启服务并刷新窗口", action: #selector(restartServices(_:)), keyEquivalent: "")
+        restartItem.target = self
+
+        menu.addItem(.separator())
+        let quitItem = menu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
+
+        statusItem.menu = menu
+        configureStatusItemButtonOnly()
     }
 
+    @MainActor
     private func configureStatusItemButtonOnly() {
-        MainActor.assumeIsolated {
-            guard let button = statusItem?.button else { return }
-            let symbolName = latestManagerSummary?.automation.enabled == true
-                ? "arrow.triangle.2.circlepath.circle.fill"
-                : "pause.circle"
-            button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: appName)
-            button.image?.isTemplate = true
-            button.imagePosition = .imageLeading
-            button.title = " \(menuBarButtonTitle())"
-            button.toolTip = menuBarTooltip()
-        }
+        requireMainThread()
+        guard let button = statusItem?.button else { return }
+        let symbolName = latestManagerSummary?.automation.enabled == true
+            ? "arrow.triangle.2.circlepath.circle.fill"
+            : "pause.circle"
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: appName)
+        button.image?.isTemplate = true
+        button.imagePosition = .imageLeading
+        button.title = " \(menuBarButtonTitle())"
+        button.toolTip = menuBarTooltip()
     }
 
+    @MainActor
     private func applyRefreshedState(summary: ManagerSummary, supportSummary: SupportSummary?) {
         latestManagerSummary = summary
         latestSupportSummary = supportSummary
@@ -455,6 +513,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         store.applyRefresh(summary: summary, supportSummary: supportSummary)
     }
 
+    @MainActor
     private func refreshManagerData(showErrorAlerts: Bool = false, silentForStore: Bool = true) {
         guard currentApiPort != nil else {
             latestManagerSummary = nil
@@ -471,13 +530,48 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             guard let self else { return }
 
             do {
-                let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/manager")
-                let supportSummary = try? self.performManagerRequest(path: "/api/support/summary") as SupportSummary
-                DispatchQueue.main.async {
-                    self.applyRefreshedState(summary: summary, supportSummary: supportSummary)
+                let summaryBox = RequestResultBox<ManagerSummary>()
+                let supportBox = RequestResultBox<SupportSummary>()
+                let group = DispatchGroup()
+
+                group.enter()
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    defer { group.leave() }
+                    guard let self else { return }
+                    do {
+                        let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/manager")
+                        summaryBox.value = .success(summary)
+                    } catch {
+                        summaryBox.value = .failure(error)
+                    }
+                }
+
+                group.enter()
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    defer { group.leave() }
+                    guard let self else { return }
+                    do {
+                        let supportSummary: SupportSummary = try self.performManagerRequest(path: "/api/support/summary")
+                        supportBox.value = .success(supportSummary)
+                    } catch {
+                        supportBox.value = .failure(error)
+                    }
+                }
+
+                group.wait()
+
+                guard let summaryResult = summaryBox.value else {
+                    throw NSError(domain: self.appName, code: 25, userInfo: [NSLocalizedDescriptionKey: "本地 manager 摘要为空"])
+                }
+
+                let summary = try summaryResult.get()
+                let supportSummary = try? supportBox.value?.get()
+                Task { @MainActor [weak self] in
+                    self?.applyRefreshedState(summary: summary, supportSummary: supportSummary)
                 }
             } catch {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     self.lastMenuBarError = error.localizedDescription
                     self.latestManagerSummary = nil
                     self.latestSupportSummary = nil
@@ -553,11 +647,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return try output.get()
     }
 
+    @MainActor
     private func performBackgroundUIRequest<T: Sendable>(
         key: String? = nil,
         errorTitle: String = "操作失败",
         request: @escaping @Sendable () throws -> T,
-        onSuccess: @escaping @Sendable (T) -> Void
+        onSuccess: @escaping @MainActor @Sendable (T) -> Void
     ) {
         if let key {
             store.setBusy(key, active: true)
@@ -568,14 +663,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
             do {
                 let result = try request()
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     if let key {
                         self.store.setBusy(key, active: false)
                     }
                     onSuccess(result)
                 }
             } catch {
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
                     if let key {
                         self.store.setBusy(key, active: false)
                     }
@@ -585,6 +682,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
+    @MainActor
     private func createProfile(_ profileName: String) {
         let trimmed = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -599,6 +697,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func loginProfile(_ profileName: String) {
         performBackgroundUIRequest(key: "login:\(profileName)", errorTitle: "启动登录流程失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/login", method: "POST") as LoginFlowSnapshot
@@ -611,6 +710,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func pollLoginFlow(_ flowId: String) {
         performBackgroundUIRequest(errorTitle: "读取登录流程失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/login-flows/\(flowId)") as LoginFlowSnapshot
@@ -619,6 +719,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func probeProfile(_ profileName: String) {
         performBackgroundUIRequest(key: "probe:\(profileName)", errorTitle: "账号探测失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/probe", method: "POST") as ManagedProfileSnapshot
@@ -628,6 +729,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func activateProfile(_ profileName: String) {
         performBackgroundUIRequest(key: "activate:\(profileName)", errorTitle: "切换账号失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/activate", method: "POST") as ManagerSummary
@@ -637,6 +739,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func activateRecommended() {
         performBackgroundUIRequest(key: "activate:recommended", errorTitle: "切换推荐账号失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/activate-recommended", method: "POST") as ManagerSummary
@@ -646,6 +749,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func saveAutomation(_ patch: AutomationSettingsPatch) {
         performBackgroundUIRequest(key: "automation:save", errorTitle: "保存自动切换设置失败", request: {
             let body = try JSONEncoder().encode(patch)
@@ -656,6 +760,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func runAutomationTick() {
         performBackgroundUIRequest(key: "automation:tick", errorTitle: "执行自动探测失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/automation/tick", method: "POST") as AutomationTickResult
@@ -669,6 +774,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         })
     }
 
+    @MainActor
     private func runSupportRepair(_ action: SupportRepairAction) {
         performBackgroundUIRequest(
             key: "support:\(action.rawValue)",
@@ -679,10 +785,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             },
             onSuccess: { result in
                 self.latestSupportSummary = result.summary
+                self.store.applySupportRepairResult(result)
                 if let summary = self.latestManagerSummary {
                     self.applyRefreshedState(summary: summary, supportSummary: result.summary)
                 } else {
-                    self.store.supportSummary = result.summary
                     self.pushLocalSnapshotToStore()
                     self.rebuildStatusItemMenu()
                     self.rebuildMenu()
@@ -698,190 +804,163 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         )
     }
 
+    @MainActor
     @objc private func refreshMenuBarNow(_ sender: Any?) {
         refreshManagerData(showErrorAlerts: true, silentForStore: false)
     }
 
+    @MainActor
     @objc private func activateRecommendedFromMenuBar(_ sender: Any?) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/activate-recommended", method: "POST")
-                DispatchQueue.main.async {
-                    self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
-                    self.store.showNotice(.success, title: "已切换到推荐账号")
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.showError(error)
-                }
-            }
-        }
+        performBackgroundUIRequest(errorTitle: "切换推荐账号失败", request: {
+            try self.performManagerRequest(path: "/api/openclaw/activate-recommended", method: "POST") as ManagerSummary
+        }, onSuccess: { summary in
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.store.showNotice(.success, title: "已切换到推荐账号")
+        })
     }
 
+    @MainActor
     @objc private func activateProfileFromMenuBar(_ sender: Any?) {
         guard let item = sender as? NSMenuItem, let profileName = item.representedObject as? String, !profileName.isEmpty else {
             return
         }
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/activate", method: "POST")
-                DispatchQueue.main.async {
-                    self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
-                    self.store.showNotice(.success, title: "已切换到 \(profileName)")
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.showError(error)
-                }
-            }
-        }
+        performBackgroundUIRequest(errorTitle: "切换账号失败", request: {
+            try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/activate", method: "POST") as ManagerSummary
+        }, onSuccess: { summary in
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.store.showNotice(.success, title: "已切换到 \(profileName)")
+        })
     }
 
+    @MainActor
     @objc private func toggleAutomationFromMenuBar(_ sender: Any?) {
         let nextEnabled = !(latestManagerSummary?.automation.enabled ?? false)
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let body = try JSONSerialization.data(withJSONObject: ["autoActivateEnabled": nextEnabled])
-                let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/settings", method: "PATCH", body: body)
-                DispatchQueue.main.async {
-                    self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
-                    self.store.showNotice(.success, title: nextEnabled ? "已开启自动切换" : "已关闭自动切换")
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.showError(error)
-                }
-            }
-        }
+        performBackgroundUIRequest(errorTitle: "更新自动切换失败", request: {
+            let body = try JSONSerialization.data(withJSONObject: ["autoActivateEnabled": nextEnabled])
+            return try self.performManagerRequest(path: "/api/openclaw/settings", method: "PATCH", body: body) as ManagerSummary
+        }, onSuccess: { summary in
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.store.showNotice(.success, title: nextEnabled ? "已开启自动切换" : "已关闭自动切换")
+        })
     }
 
+    @MainActor
     @objc private func runAutomationTickFromMenuBar(_ sender: Any?) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let result: AutomationTickResult = try self.performManagerRequest(path: "/api/openclaw/automation/tick", method: "POST")
-                DispatchQueue.main.async {
-                    self.applyRefreshedState(summary: result.summary, supportSummary: self.latestSupportSummary)
-                    self.store.showNotice(.info, title: result.switched ? "本轮已完成切换" : "本轮未切换", detail: result.reason)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.showError(error)
-                }
-            }
-        }
+        performBackgroundUIRequest(errorTitle: "执行自动探测失败", request: {
+            try self.performManagerRequest(path: "/api/openclaw/automation/tick", method: "POST") as AutomationTickResult
+        }, onSuccess: { result in
+            self.applyRefreshedState(summary: result.summary, supportSummary: self.latestSupportSummary)
+            self.store.showNotice(.info, title: result.switched ? "本轮已完成切换" : "本轮未切换", detail: result.reason)
+        })
     }
 
+    @MainActor
     private func rebuildMenu() {
-        MainActor.assumeIsolated {
-            let watchdog = collectWatchdogSummary()
-            let menu = NSMenu()
+        requireMainThread()
+        let watchdog = collectWatchdogSummary()
+        let menu = NSMenu()
 
-            let appItem = NSMenuItem()
-            menu.addItem(appItem)
+        let appItem = NSMenuItem()
+        menu.addItem(appItem)
 
-            let appMenu = NSMenu(title: appName)
-            appItem.submenu = appMenu
-            appMenu.addItem(withTitle: "查看当前配置", action: #selector(showCurrentConfig(_:)), keyEquivalent: "i").target = self
-            appMenu.addItem(.separator())
-            appMenu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
+        let appMenu = NSMenu(title: appName)
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "查看当前配置", action: #selector(showCurrentConfig(_:)), keyEquivalent: "i").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
 
-            let configItem = NSMenuItem()
-            menu.addItem(configItem)
+        let configItem = NSMenuItem()
+        menu.addItem(configItem)
 
-            let configMenu = NSMenu(title: "配置")
-            configItem.submenu = configMenu
-            let openclawInfo = NSMenuItem(title: "OpenClaw 根目录: \(shortPath(currentConfig.openclawHomeDir))", action: nil, keyEquivalent: "")
-            openclawInfo.isEnabled = false
-            configMenu.addItem(openclawInfo)
-            configMenu.addItem(withTitle: "选择 OpenClaw 根目录...", action: #selector(selectOpenClawRoot(_:)), keyEquivalent: "o").target = self
-            configMenu.addItem(withTitle: "重置 OpenClaw 根目录为当前用户 Home", action: #selector(resetOpenClawRoot(_:)), keyEquivalent: "").target = self
-            configMenu.addItem(.separator())
-            let codexInfo = NSMenuItem(title: "可选 Codex 根目录: \(shortPath(currentConfig.codexHomeDir))", action: nil, keyEquivalent: "")
-            codexInfo.isEnabled = false
-            configMenu.addItem(codexInfo)
-            configMenu.addItem(withTitle: "选择 Codex 根目录...", action: #selector(selectCodexRoot(_:)), keyEquivalent: "c").target = self
-            configMenu.addItem(withTitle: "重置 Codex 根目录为当前用户 Home", action: #selector(resetCodexRoot(_:)), keyEquivalent: "").target = self
-            configMenu.addItem(.separator())
-            configMenu.addItem(withTitle: "打开设置文件", action: #selector(openSettingsFile(_:)), keyEquivalent: "").target = self
-            configMenu.addItem(withTitle: "打开应用数据目录", action: #selector(openAppSupportDirectory(_:)), keyEquivalent: "").target = self
-            configMenu.addItem(withTitle: "打开 Manager 状态目录", action: #selector(openManagerStateDirectory(_:)), keyEquivalent: "").target = self
-            configMenu.addItem(.separator())
-            configMenu.addItem(withTitle: "重启服务并刷新窗口", action: #selector(restartServices(_:)), keyEquivalent: "r").target = self
+        let configMenu = NSMenu(title: "配置")
+        configItem.submenu = configMenu
+        let openclawInfo = NSMenuItem(title: "OpenClaw 根目录: \(shortPath(currentConfig.openclawHomeDir))", action: nil, keyEquivalent: "")
+        openclawInfo.isEnabled = false
+        configMenu.addItem(openclawInfo)
+        configMenu.addItem(withTitle: "选择 OpenClaw 根目录...", action: #selector(selectOpenClawRoot(_:)), keyEquivalent: "o").target = self
+        configMenu.addItem(withTitle: "重置 OpenClaw 根目录为当前用户 Home", action: #selector(resetOpenClawRoot(_:)), keyEquivalent: "").target = self
+        configMenu.addItem(.separator())
+        let codexInfo = NSMenuItem(title: "可选 Codex 根目录: \(shortPath(currentConfig.codexHomeDir))", action: nil, keyEquivalent: "")
+        codexInfo.isEnabled = false
+        configMenu.addItem(codexInfo)
+        configMenu.addItem(withTitle: "选择 Codex 根目录...", action: #selector(selectCodexRoot(_:)), keyEquivalent: "c").target = self
+        configMenu.addItem(withTitle: "重置 Codex 根目录为当前用户 Home", action: #selector(resetCodexRoot(_:)), keyEquivalent: "").target = self
+        configMenu.addItem(.separator())
+        configMenu.addItem(withTitle: "打开设置文件", action: #selector(openSettingsFile(_:)), keyEquivalent: "").target = self
+        configMenu.addItem(withTitle: "打开应用数据目录", action: #selector(openAppSupportDirectory(_:)), keyEquivalent: "").target = self
+        configMenu.addItem(withTitle: "打开 Manager 状态目录", action: #selector(openManagerStateDirectory(_:)), keyEquivalent: "").target = self
+        configMenu.addItem(.separator())
+        configMenu.addItem(withTitle: "重启服务并刷新窗口", action: #selector(restartServices(_:)), keyEquivalent: "r").target = self
 
-            let watchdogItem = NSMenuItem()
-            menu.addItem(watchdogItem)
+        let watchdogItem = NSMenuItem()
+        menu.addItem(watchdogItem)
 
-            let watchdogMenu = NSMenu(title: "稳定守护")
-            watchdogItem.submenu = watchdogMenu
-            let watchdogInfo = NSMenuItem(title: "状态: \(watchdog.statusLine)", action: nil, keyEquivalent: "")
-            watchdogInfo.isEnabled = false
-            watchdogMenu.addItem(watchdogInfo)
-            if let monitoredStateDir = watchdog.monitoredStateDir {
-                let monitoredInfo = NSMenuItem(title: "监控目录: \(shortPath(monitoredStateDir))", action: nil, keyEquivalent: "")
-                monitoredInfo.isEnabled = false
-                watchdogMenu.addItem(monitoredInfo)
-            }
-            watchdogMenu.addItem(.separator())
-            let enableTitle = watchdog.installed ? "按当前目录重新启用稳定守护" : "启用稳定守护"
-            watchdogMenu.addItem(withTitle: enableTitle, action: #selector(enableWatchdog(_:)), keyEquivalent: "").target = self
-            let disableItem = watchdogMenu.addItem(withTitle: "停用稳定守护", action: #selector(disableWatchdog(_:)), keyEquivalent: "")
-            disableItem.target = self
-            disableItem.isEnabled = watchdog.installed
-            watchdogMenu.addItem(withTitle: "查看守护状态", action: #selector(showWatchdogStatus(_:)), keyEquivalent: "").target = self
-            watchdogMenu.addItem(withTitle: "立即巡检并恢复", action: #selector(runWatchdogCheckNow(_:)), keyEquivalent: "").target = self
-            watchdogMenu.addItem(withTitle: "打开守护日志", action: #selector(openWatchdogLog(_:)), keyEquivalent: "").target = self
-            watchdogMenu.addItem(withTitle: "打开守护状态目录", action: #selector(openWatchdogStateDirectory(_:)), keyEquivalent: "").target = self
-
-            let supportItem = NSMenuItem()
-            menu.addItem(supportItem)
-
-            let supportMenu = NSMenu(title: "诊断与修复")
-            supportItem.submenu = supportMenu
-            let supportStatus = latestSupportSummary?.discord.status ?? "unknown"
-            let supportStatusTitle: String
-            switch supportStatus {
-            case "healthy":
-                supportStatusTitle = "Discord 状态: 正常"
-            case "unstable":
-                supportStatusTitle = "Discord 状态: 不稳定"
-            case "offline":
-                supportStatusTitle = "Discord 状态: 离线"
-            default:
-                supportStatusTitle = "Discord 状态: 读取中"
-            }
-            let supportStatusItem = NSMenuItem(title: supportStatusTitle, action: nil, keyEquivalent: "")
-            supportStatusItem.isEnabled = false
-            supportMenu.addItem(supportStatusItem)
-            let gatewayStatusTitle = latestSupportSummary?.gateway.reachable == true
-                ? "OpenClaw 服务: 可达"
-                : "OpenClaw 服务: 不可达"
-            let gatewayStatusItem = NSMenuItem(title: gatewayStatusTitle, action: nil, keyEquivalent: "")
-            gatewayStatusItem.isEnabled = false
-            supportMenu.addItem(gatewayStatusItem)
-            supportMenu.addItem(.separator())
-            supportMenu.addItem(withTitle: "打开诊断中心", action: #selector(openSupportCenter(_:)), keyEquivalent: "d").target = self
-            supportMenu.addItem(withTitle: "一键修复", action: #selector(runOneClickRepair(_:)), keyEquivalent: "").target = self
-            supportMenu.addItem(withTitle: "重启 OpenClaw 服务", action: #selector(restartGatewayFromSupport(_:)), keyEquivalent: "").target = self
-            supportMenu.addItem(withTitle: "打开 Gateway 日志", action: #selector(openGatewayLog(_:)), keyEquivalent: "").target = self
-            supportMenu.addItem(withTitle: "打开守护日志", action: #selector(openWatchdogLog(_:)), keyEquivalent: "").target = self
-
-            let windowItem = NSMenuItem()
-            menu.addItem(windowItem)
-
-            let windowMenu = NSMenu(title: "窗口")
-            windowItem.submenu = windowMenu
-            windowMenu.addItem(withTitle: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "1").target = self
-            windowMenu.addItem(withTitle: "刷新状态", action: #selector(refreshMenuBarNow(_:)), keyEquivalent: "l").target = self
-
-            NSApp.mainMenu = menu
-            rebuildStatusItemMenu()
+        let watchdogMenu = NSMenu(title: "稳定守护")
+        watchdogItem.submenu = watchdogMenu
+        let watchdogInfo = NSMenuItem(title: "状态: \(watchdog.statusLine)", action: nil, keyEquivalent: "")
+        watchdogInfo.isEnabled = false
+        watchdogMenu.addItem(watchdogInfo)
+        if let monitoredStateDir = watchdog.monitoredStateDir {
+            let monitoredInfo = NSMenuItem(title: "监控目录: \(shortPath(monitoredStateDir))", action: nil, keyEquivalent: "")
+            monitoredInfo.isEnabled = false
+            watchdogMenu.addItem(monitoredInfo)
         }
+        watchdogMenu.addItem(.separator())
+        let enableTitle = watchdog.installed ? "按当前目录重新启用稳定守护" : "启用稳定守护"
+        watchdogMenu.addItem(withTitle: enableTitle, action: #selector(enableWatchdog(_:)), keyEquivalent: "").target = self
+        let disableItem = watchdogMenu.addItem(withTitle: "停用稳定守护", action: #selector(disableWatchdog(_:)), keyEquivalent: "")
+        disableItem.target = self
+        disableItem.isEnabled = watchdog.installed
+        watchdogMenu.addItem(withTitle: "查看守护状态", action: #selector(showWatchdogStatus(_:)), keyEquivalent: "").target = self
+        watchdogMenu.addItem(withTitle: "立即巡检并恢复", action: #selector(runWatchdogCheckNow(_:)), keyEquivalent: "").target = self
+        watchdogMenu.addItem(withTitle: "打开守护日志", action: #selector(openWatchdogLog(_:)), keyEquivalent: "").target = self
+        watchdogMenu.addItem(withTitle: "打开守护状态目录", action: #selector(openWatchdogStateDirectory(_:)), keyEquivalent: "").target = self
+
+        let supportItem = NSMenuItem()
+        menu.addItem(supportItem)
+
+        let supportMenu = NSMenu(title: "诊断与修复")
+        supportItem.submenu = supportMenu
+        let supportStatus = latestSupportSummary?.discord.status ?? "unknown"
+        let supportStatusTitle: String
+        switch supportStatus {
+        case "healthy":
+            supportStatusTitle = "Discord 状态: 正常"
+        case "unstable":
+            supportStatusTitle = "Discord 状态: 不稳定"
+        case "offline":
+            supportStatusTitle = "Discord 状态: 离线"
+        default:
+            supportStatusTitle = "Discord 状态: 读取中"
+        }
+        let supportStatusItem = NSMenuItem(title: supportStatusTitle, action: nil, keyEquivalent: "")
+        supportStatusItem.isEnabled = false
+        supportMenu.addItem(supportStatusItem)
+        let gatewayStatusTitle = latestSupportSummary?.gateway.reachable == true
+            ? "OpenClaw 服务: 可达"
+            : "OpenClaw 服务: 不可达"
+        let gatewayStatusItem = NSMenuItem(title: gatewayStatusTitle, action: nil, keyEquivalent: "")
+        gatewayStatusItem.isEnabled = false
+        supportMenu.addItem(gatewayStatusItem)
+        supportMenu.addItem(.separator())
+        supportMenu.addItem(withTitle: "打开诊断中心", action: #selector(openSupportCenter(_:)), keyEquivalent: "d").target = self
+        supportMenu.addItem(withTitle: "一键修复", action: #selector(runOneClickRepair(_:)), keyEquivalent: "").target = self
+        supportMenu.addItem(withTitle: "重启 OpenClaw 服务", action: #selector(restartGatewayFromSupport(_:)), keyEquivalent: "").target = self
+        supportMenu.addItem(withTitle: "打开 Gateway 日志", action: #selector(openGatewayLog(_:)), keyEquivalent: "").target = self
+        supportMenu.addItem(withTitle: "打开守护日志", action: #selector(openWatchdogLog(_:)), keyEquivalent: "").target = self
+
+        let windowItem = NSMenuItem()
+        menu.addItem(windowItem)
+
+        let windowMenu = NSMenu(title: "窗口")
+        windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "显示主窗口", action: #selector(showMainWindow(_:)), keyEquivalent: "1").target = self
+        windowMenu.addItem(withTitle: "刷新状态", action: #selector(refreshMenuBarNow(_:)), keyEquivalent: "l").target = self
+
+        NSApp.mainMenu = menu
+        rebuildStatusItemMenu()
     }
 
     private func shortPath(_ raw: String) -> String {
@@ -891,6 +970,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return "...\(raw.suffix(53))"
     }
 
+    @MainActor
     @objc private func showCurrentConfig(_ sender: Any?) {
         let watchdog = collectWatchdogSummary()
         var details: [String] = []
@@ -932,37 +1012,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         showInfo(message: "当前配置", detail: details.joined(separator: "\n"))
     }
 
+    @MainActor
     @objc private func selectOpenClawRoot(_ sender: Any?) {
         selectDirectory(title: "选择 OpenClaw 根目录", target: .openclaw)
     }
 
+    @MainActor
     @objc private func resetOpenClawRoot(_ sender: Any?) {
         updateConfig(target: .openclaw, value: NSHomeDirectory(), reason: "reset-openclaw")
     }
 
+    @MainActor
     @objc private func selectCodexRoot(_ sender: Any?) {
         selectDirectory(title: "选择可选 Codex 根目录", target: .codex)
     }
 
+    @MainActor
     @objc private func resetCodexRoot(_ sender: Any?) {
         updateConfig(target: .codex, value: NSHomeDirectory(), reason: "reset-codex")
     }
 
+    @MainActor
     @objc private func openSettingsFile(_ sender: Any?) {
         guard let settingsURL else { return }
         NSWorkspace.shared.open(settingsURL)
     }
 
+    @MainActor
     @objc private func openAppSupportDirectory(_ sender: Any?) {
         guard let appSupportURL else { return }
         NSWorkspace.shared.open(appSupportURL)
     }
 
+    @MainActor
     @objc private func openManagerStateDirectory(_ sender: Any?) {
         guard let appSupportURL else { return }
         NSWorkspace.shared.open(appSupportURL.appendingPathComponent("manager-state", isDirectory: true))
     }
 
+    @MainActor
     @objc private func restartServices(_ sender: Any?) {
         do {
             try restartRuntime(reason: "manual")
@@ -973,25 +1061,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
+    @MainActor
     @objc private func openSupportCenter(_ sender: Any?) {
         store.selectedSection = .diagnostics
         showMainWindow(nil)
     }
 
+    @MainActor
     @objc private func showMainWindow(_ sender: Any?) {
-        MainActor.assumeIsolated {
-            presentMainWindow()
-        }
+        presentMainWindow()
     }
 
+    @MainActor
     @objc private func runOneClickRepair(_ sender: Any?) {
         runSupportRepair(.runWatchdogCheck)
     }
 
+    @MainActor
     @objc private func restartGatewayFromSupport(_ sender: Any?) {
         runSupportRepair(.restartGateway)
     }
 
+    @MainActor
     @objc private func enableWatchdog(_ sender: Any?) {
         do {
             let scriptURL = try bundledScriptURL(named: "install-watchdog.sh")
@@ -1009,6 +1100,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
+    @MainActor
     @objc private func disableWatchdog(_ sender: Any?) {
         do {
             let scriptURL = try bundledScriptURL(named: "uninstall-watchdog.sh")
@@ -1025,6 +1117,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
+    @MainActor
     @objc private func showWatchdogStatus(_ sender: Any?) {
         let watchdog = collectWatchdogSummary()
         var details: [String] = []
@@ -1061,6 +1154,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         showInfo(message: "稳定守护状态", detail: details.joined(separator: "\n"))
     }
 
+    @MainActor
     @objc private func runWatchdogCheckNow(_ sender: Any?) {
         do {
             let result = try runCommand(
@@ -1077,6 +1171,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
+    @MainActor
     @objc private func openWatchdogLog(_ sender: Any?) {
         let watchdog = collectWatchdogSummary()
         let logURL = watchdogLogURL(using: watchdog.monitoredStateDir)
@@ -1095,6 +1190,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         showInfo(message: "守护日志不存在", detail: "当前还没有生成守护日志：\n\(logURL.path)")
     }
 
+    @MainActor
     @objc private func openGatewayLog(_ sender: Any?) {
         let logURL = gatewayLogURL()
         let fileManager = FileManager.default
@@ -1112,6 +1208,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         showInfo(message: "Gateway 日志不存在", detail: "当前还没有生成 gateway 日志：\n\(logURL.path)")
     }
 
+    @MainActor
     @objc private func openWatchdogStateDirectory(_ sender: Any?) {
         guard let supportURL = watchdogSupportDirectoryURL() else { return }
         let fileManager = FileManager.default
@@ -1122,6 +1219,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         showInfo(message: "守护状态目录不存在", detail: "当前还没有生成守护状态目录：\n\(supportURL.path)")
     }
 
+    @MainActor
     private func selectDirectory(title: String, target: RuntimeRootTarget) {
         let currentPath: String
         switch target {
@@ -1131,23 +1229,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             currentPath = currentConfig.codexHomeDir
         }
 
-        MainActor.assumeIsolated {
-            let panel = NSOpenPanel()
-            panel.title = title
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.canCreateDirectories = true
-            panel.allowsMultipleSelection = false
-            panel.directoryURL = URL(fileURLWithPath: currentPath)
+        requireMainThread()
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: currentPath)
 
-            guard panel.runModal() == .OK, let url = panel.url else {
-                return
-            }
-
-            updateConfig(target: target, value: url.path, reason: title)
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
         }
+
+        updateConfig(target: target, value: url.path, reason: title)
     }
 
+    @MainActor
     private func updateConfig(target: RuntimeRootTarget, value: String, reason: String) {
         do {
             var next = currentConfig
@@ -1339,48 +1437,49 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return ISO8601DateFormatter().string(from: date)
     }
 
+    @MainActor
     private func ensureWindow() {
-        MainActor.assumeIsolated {
-            if window != nil {
-                return
-            }
-
-            let hostingController = NSHostingController(rootView: NativeRootView(store: store).preferredColorScheme(.dark))
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1400, height: 920),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = appName
-            window.appearance = NSAppearance(named: .darkAqua)
-            window.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.titlebarSeparatorStyle = .none
-            window.isMovableByWindowBackground = true
-            window.isReleasedWhenClosed = false
-            window.toolbarStyle = .unifiedCompact
-            window.minSize = NSSize(width: 1120, height: 760)
-            window.center()
-            window.delegate = self
-            window.contentViewController = hostingController
-            window.makeKeyAndOrderFront(nil)
-
-            self.window = window
+        requireMainThread()
+        if window != nil {
+            return
         }
+
+        let hostingController = NSHostingController(rootView: NativeRootView(store: store).preferredColorScheme(.dark))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1400, height: 920),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = appName
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.backgroundColor = NSColor(calibratedRed: 0.07, green: 0.08, blue: 0.10, alpha: 1)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.toolbarStyle = .unifiedCompact
+        window.minSize = NSSize(width: 1120, height: 760)
+        window.center()
+        window.delegate = self
+        window.contentViewController = hostingController
+        window.makeKeyAndOrderFront(nil)
+
+        self.window = window
     }
 
+    @MainActor
     private func presentMainWindow() {
-        MainActor.assumeIsolated {
-            ensureWindow()
-            guard let window else { return }
-            window.makeKeyAndOrderFront(nil)
-            window.orderFrontRegardless()
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        requireMainThread()
+        ensureWindow()
+        guard let window else { return }
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
+    @MainActor
     private func restartRuntime(reason: String) throws {
         guard let runtimeRootURL else {
             throw NSError(domain: appName, code: 4, userInfo: [NSLocalizedDescriptionKey: "Runtime 目录不可用"])
@@ -1399,22 +1498,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
         try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: true)
 
+        var environment: [String: String] = [
+            "OPENCLAW_MANAGER_RUNTIME_MODE": "native",
+            "HOST": "127.0.0.1",
+            "PORT": String(apiPort),
+            "HOME": NSHomeDirectory(),
+            "PATH": daemonLaunchPATH(),
+            "OPENCLAW_HOME_DIR": currentConfig.openclawHomeDir,
+            "OPENCLAW_CODEX_HOME_DIR": currentConfig.codexHomeDir,
+            "OPENCLAW_MANAGER_DIR": stateURL.path,
+            "OPENCLAW_OAUTH_CALLBACK_PORT": String(callbackPort),
+            "OPENCLAW_OAUTH_CALLBACK_BIND_HOST": "127.0.0.1",
+            "OPENCLAW_OAUTH_CALLBACK_PUBLIC_HOST": "localhost",
+            "OPENCLAW_AUTH_OPEN_MODE": "auto"
+        ]
+        if let openclawBin = preferredOpenClawBin() {
+            environment["OPENCLAW_BIN"] = openclawBin
+        }
+
         backendProcess = try launchProcess(
             executableURL: daemonURL,
             arguments: [],
-            environment: [
-                "OPENCLAW_MANAGER_RUNTIME_MODE": "native",
-                "HOST": "127.0.0.1",
-                "PORT": String(apiPort),
-                "OPENCLAW_HOME_DIR": currentConfig.openclawHomeDir,
-                "OPENCLAW_CODEX_HOME_DIR": currentConfig.codexHomeDir,
-                "OPENCLAW_MANAGER_DIR": stateURL.path,
-                "OPENCLAW_OAUTH_CALLBACK_PORT": String(callbackPort),
-                "OPENCLAW_OAUTH_CALLBACK_BIND_HOST": "127.0.0.1",
-                "OPENCLAW_OAUTH_CALLBACK_PUBLIC_HOST": "localhost",
-                "OPENCLAW_AUTH_OPEN_MODE": "auto"
-            ],
-            currentDirectoryURL: runtimeRootURL,
+            environment: environment,
+            currentDirectoryURL: stateURL,
             logPrefix: "manager-api"
         )
 
@@ -1426,6 +1532,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         rebuildMenu()
 
         print("[native] runtime ready (\(reason)) api=\(apiPort) callback=\(callbackPort)")
+    }
+
+    private func preferredOpenClawBin() -> String? {
+        let explicit = ProcessInfo.processInfo.environment["OPENCLAW_BIN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let explicit, !explicit.isEmpty, FileManager.default.isExecutableFile(atPath: explicit) {
+            return explicit
+        }
+
+        let local = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".local", isDirectory: true)
+            .appendingPathComponent("bin", isDirectory: true)
+            .appendingPathComponent("openclaw")
+
+        if FileManager.default.isExecutableFile(atPath: local.path) {
+            return local.path
+        }
+
+        return nil
+    }
+
+    private func daemonLaunchPATH() -> String {
+        let preferred = [
+            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".local/bin", isDirectory: true).path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ]
+        let existing = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+
+        var merged: [String] = []
+        var seen = Set<String>()
+        for entry in preferred + existing {
+            let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if seen.insert(trimmed).inserted {
+                merged.append(trimmed)
+            }
+        }
+        return merged.joined(separator: ":")
     }
 
     private func launchProcess(
@@ -1470,6 +1620,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return process
     }
 
+    @MainActor
     private func terminateProcesses() {
         stopProcess(&backendProcess)
         currentApiPort = nil
@@ -1583,25 +1734,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         return CFSwapInt16BigToHost(boundAddress.sin_port)
     }
 
+    @MainActor
     private func showInfo(message: String, detail: String) {
-        MainActor.assumeIsolated {
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            alert.messageText = message
-            alert.informativeText = detail
-            alert.runModal()
-        }
+        requireMainThread()
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = message
+        alert.informativeText = detail
+        alert.runModal()
     }
 
+    @MainActor
     private func showError(_ error: Error) {
         showInfo(message: "操作失败", detail: error.localizedDescription)
     }
 
+    @MainActor
     private func showFatalError(_ error: Error) {
-        MainActor.assumeIsolated {
-            showInfo(message: "桌面版启动失败", detail: error.localizedDescription)
-            NSApp.terminate(nil)
-        }
+        requireMainThread()
+        showInfo(message: "桌面版启动失败", detail: error.localizedDescription)
+        NSApp.terminate(nil)
     }
 }
 

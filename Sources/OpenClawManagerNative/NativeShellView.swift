@@ -88,6 +88,25 @@ private func riskPresentation(_ risk: String) -> StatusPresentation {
     }
 }
 
+private func configValidationPresentation(_ valid: Bool) -> StatusPresentation {
+    valid
+        ? StatusPresentation(label: "有效", tint: .green)
+        : StatusPresentation(label: "需修复", tint: .red)
+}
+
+private func gatewayServicePresentation(_ summary: SupportSummary.Maintenance.GatewayService) -> StatusPresentation {
+    if let issue = summary.issue, !issue.isEmpty {
+        return StatusPresentation(label: "需处理", tint: .red)
+    }
+    if !summary.installed {
+        return StatusPresentation(label: "未安装", tint: .orange)
+    }
+    if let probeStatus = summary.probeStatus?.lowercased(), probeStatus.contains("failed") {
+        return StatusPresentation(label: "待检查", tint: .orange)
+    }
+    return StatusPresentation(label: "正常", tint: .green)
+}
+
 private func runtimeModeLabel(_ mode: RuntimeMode?) -> String {
     switch mode {
     case .native:
@@ -191,14 +210,31 @@ private func providerLabel(_ providerId: String?) -> String {
     }
 }
 
-private func profileSupportsCodexLogin(_ profile: ManagedProfileSnapshot) -> Bool {
-    if let providerId = profile.primaryProviderId, !providerId.isEmpty {
-        return providerId == "openai-codex"
+private func loginKindLabel(_ loginKind: String?) -> String {
+    switch loginKind {
+    case "codex-oauth":
+        return "支持 Codex 登录"
+    default:
+        return "不提供内置登录"
     }
-    if profile.configuredProviderIds.contains("openai-codex") {
-        return true
+}
+
+private func loginActionLabel(_ loginKind: String?) -> String? {
+    switch loginKind {
+    case "codex-oauth":
+        return "登录 Codex"
+    default:
+        return nil
     }
-    return profile.primaryModelId == nil
+}
+
+private func companionRuntimeLabel(_ runtimeKind: String?) -> String? {
+    switch runtimeKind {
+    case "codex":
+        return "Codex"
+    default:
+        return nil
+    }
 }
 
 private func present(_ value: String?, fallback: String = "未提供") -> String {
@@ -274,7 +310,7 @@ private func diagnosticsPresentation(summary: SupportSummary?) -> StatusPresenta
 private func profileCapabilitySummary(_ profile: ManagedProfileSnapshot) -> String {
     let provider = providerLabel(profile.primaryProviderId)
     let quota = profile.supportsQuota ? "支持额度探测" : "不探测额度"
-    return "主 provider: \(provider) · \(quota)"
+    return "主 provider: \(provider) · \(quota) · \(loginKindLabel(profile.loginKind))"
 }
 
 private func profileFactItems(_ profile: ManagedProfileSnapshot) -> [(String, String)] {
@@ -282,10 +318,15 @@ private func profileFactItems(_ profile: ManagedProfileSnapshot) -> [(String, St
         ("主 provider", providerLabel(profile.primaryProviderId)),
         ("主模型", present(profile.primaryModelId)),
         ("配置 provider", profile.configuredProviderIds.isEmpty ? "未提供" : profile.configuredProviderIds.joined(separator: " · ")),
+        ("登录能力", loginKindLabel(profile.loginKind)),
         ("令牌剩余", formatDuration(ms: profile.tokenExpiresInMs)),
         ("账号 ID", shortAccountId(profile.accountId)),
         ("状态目录", profile.stateDir)
     ]
+
+    if let companion = companionRuntimeLabel(profile.companionRuntimeKind) {
+        items.append(("Companion", companion))
+    }
 
     if profile.supportsQuota {
         items.insert(("套餐", present(profile.quota.plan)), at: 3)
@@ -313,6 +354,7 @@ private enum DiagnosticActionKind {
     case support(SupportRepairAction)
     case openGatewayLog
     case openWatchdogLog
+    case openPath(String)
 }
 
 private struct DiagnosticActionPlan {
@@ -356,6 +398,16 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
     let rawError = summary.gateway.error?.trimmingCharacters(in: .whitespacesAndNewlines)
     let normalized = rawError?.lowercased() ?? ""
 
+    if normalized.contains("uv_cwd") || normalized.contains("getcwd") || normalized.contains("cannot access parent directories") {
+        return GatewayDiagnosis(
+            headline: "服务运行目录失效",
+            detail: "当前运行中的服务工作目录已经失效，通常是 app 被替换后旧进程还在跑。重启服务或重开 app 即可恢复。",
+            rawError: rawError,
+            prefersSettings: false,
+            prefersRestartServices: true
+        )
+    }
+
     if normalized.contains("enoent") && normalized.contains("openclaw") {
         return GatewayDiagnosis(
             headline: "未找到 OpenClaw CLI",
@@ -395,11 +447,45 @@ private func gatewayDiagnosis(summary: SupportSummary?) -> GatewayDiagnosis {
     )
 }
 
+private func maintenanceHeadline(summary: SupportSummary?) -> String {
+    guard let summary else {
+        return "等待诊断数据。"
+    }
+
+    if !summary.maintenance.config.valid {
+        return "OpenClaw 配置没有通过校验。"
+    }
+    if let serviceIssue = summary.maintenance.gatewayService.issue, !serviceIssue.isEmpty {
+        _ = serviceIssue
+        return "Gateway 服务配置需要处理。"
+    }
+    if summary.discord.status == "offline" {
+        return "Discord 当前离线。"
+    }
+    if summary.environment.riskLevel == "high" || summary.environment.riskLevel == "watch" {
+        return "当前网络环境会影响稳定性。"
+    }
+    if !summary.gateway.reachable {
+        return gatewayDiagnosis(summary: summary).headline
+    }
+    return "当前没有明显故障。"
+}
+
 private func primaryRecommendation(summary: SupportSummary?) -> String {
     guard let summary else {
         return "等待诊断数据。"
     }
 
+    if !summary.maintenance.config.valid {
+        return "先点“官方修复”，修完后再点“校验配置”。"
+    }
+    if let recommendation = summary.maintenance.gatewayService.recommendation,
+       !recommendation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return recommendation
+    }
+    if let serviceIssue = summary.maintenance.gatewayService.issue, !serviceIssue.isEmpty {
+        return "先点“重装服务”，再做一次“官方体检”。"
+    }
     if summary.discord.status == "offline" {
         return summary.discord.recommendation
     }
@@ -409,7 +495,52 @@ private func primaryRecommendation(summary: SupportSummary?) -> String {
     if !summary.gateway.reachable {
         return gatewayDiagnosis(summary: summary).detail
     }
-    return "当前没有明显故障。保持自动切换和 watchdog 即可。"
+    return "现在不需要维护动作。保持自动切换和 watchdog 即可。"
+}
+
+private func supportRepairTitle(_ action: SupportRepairAction) -> String {
+    switch action {
+    case .validateConfig:
+        return "校验配置"
+    case .runOpenClawDoctor:
+        return "官方体检"
+    case .runOpenClawDoctorFix:
+        return "官方修复"
+    case .reinstallGatewayService:
+        return "重装 Gateway 服务"
+    case .runWatchdogCheck:
+        return "一键修复"
+    case .restartGateway:
+        return "重启 OpenClaw 服务"
+    case .reinstallWatchdog:
+        return "重新部署稳定守护"
+    case .openGatewayLog:
+        return "打开 Gateway 日志"
+    case .openWatchdogLog:
+        return "打开守护日志"
+    }
+}
+
+private func supportRepairSummary(_ result: SupportRepairResult) -> String {
+    let source = result.output?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        ? result.output ?? result.message
+        : result.message
+    let lines = source
+        .split(whereSeparator: \.isNewline)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+
+    guard !lines.isEmpty else {
+        return result.message
+    }
+    return lines.prefix(3).joined(separator: "\n")
+}
+
+private func supportRepairFollowUp(_ result: SupportRepairResult) -> String {
+    if result.ok {
+        return "执行完成后，回来看上面的“当前判断”和“维护建议”是否已经恢复正常。"
+    }
+    return "这一步还没解决时，按上面的“建议先做”继续处理。"
 }
 
 private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
@@ -422,6 +553,62 @@ private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
             primary: nil,
             secondary: nil,
             tertiary: nil
+        )
+    }
+
+    if !summary.maintenance.config.valid {
+        return DiagnosticPlan(
+            headline: "OpenClaw 配置需要修复",
+            impact: "配置无效时，gateway 启动、状态读取和后续维护动作都会变得不可靠。",
+            detail: "配置文件没有通过校验。先用“官方修复”自动整理，再用“重新校验”确认。",
+            accent: NativePalette.rose,
+            primary: DiagnosticActionPlan(
+                title: "官方修复",
+                systemImage: "cross.case",
+                action: .support(.runOpenClawDoctorFix),
+                prominent: true
+            ),
+            secondary: DiagnosticActionPlan(
+                title: "重新校验",
+                systemImage: "checklist",
+                action: .support(.validateConfig),
+                prominent: false
+            ),
+            tertiary: DiagnosticActionPlan(
+                title: "打开配置",
+                systemImage: "doc.text",
+                action: .openPath(summary.maintenance.config.path),
+                prominent: false
+            )
+        )
+    }
+
+    if let serviceIssue = summary.maintenance.gatewayService.issue, !serviceIssue.isEmpty {
+        return DiagnosticPlan(
+            headline: "Gateway 服务需要维护",
+            impact: "Gateway 服务配置异常时，后台自启动、状态探测和 Discord 连通性恢复都会受影响。",
+            detail: "当前 Gateway 服务配置不可靠。先点“重装服务”，再做一次“官方体检”确认。",
+            accent: NativePalette.rose,
+            primary: DiagnosticActionPlan(
+                title: "重装服务",
+                systemImage: "shippingbox.circle",
+                action: .support(.reinstallGatewayService),
+                prominent: true
+            ),
+            secondary: DiagnosticActionPlan(
+                title: "官方体检",
+                systemImage: "stethoscope",
+                action: .support(.runOpenClawDoctor),
+                prominent: false
+            ),
+            tertiary: summary.maintenance.gatewayService.serviceFile.map {
+                DiagnosticActionPlan(
+                    title: "打开服务文件",
+                    systemImage: "doc.text.magnifyingglass",
+                    action: .openPath($0),
+                    prominent: false
+                )
+            }
         )
     }
 
@@ -1222,8 +1409,8 @@ private struct ProfilesSection: View {
                         TwoColumnFacts(items: [("状态说明", spotlight.statusReason)] + profileFactItems(spotlight))
 
                         AdaptiveLine(spacing: 10) {
-                            if profileSupportsCodexLogin(spotlight) {
-                                ActionButton("登录 Codex", systemImage: "person.badge.key", busy: store.isBusy("login:\(spotlight.name)")) {
+                            if spotlight.supportsLogin, let loginLabel = loginActionLabel(spotlight.loginKind) {
+                                ActionButton(loginLabel, systemImage: "person.badge.key", busy: store.isBusy("login:\(spotlight.name)")) {
                                     store.login(profileName: spotlight.name)
                                 }
                             }
@@ -1389,8 +1576,8 @@ private struct ProfileCardView: View {
                         store.selectProfile(profile.name)
                     }
                     .buttonStyle(NativeSecondaryButtonStyle())
-                    if profileSupportsCodexLogin(profile) {
-                        ActionButton("登录 Codex", systemImage: "person.badge.key", busy: store.isBusy("login:\(profile.name)")) {
+                    if profile.supportsLogin, let loginLabel = loginActionLabel(profile.loginKind) {
+                        ActionButton(loginLabel, systemImage: "person.badge.key", busy: store.isBusy("login:\(profile.name)")) {
                             store.login(profileName: profile.name)
                         }
                     }
@@ -1663,7 +1850,7 @@ private struct DiagnosticsSection: View {
                     )
                 }
 
-                GridCard(title: "修复面板", subtitle: "当前判断和可执行动作", systemImage: "sparkles", accent: plan.accent) {
+                GridCard(title: "先做这一步", subtitle: "当前建议和可执行动作", systemImage: "sparkles", accent: plan.accent) {
                     VStack(alignment: .leading, spacing: 12) {
                         diagnosticsSummaryBlock(
                             label: "当前判断",
@@ -1672,16 +1859,22 @@ private struct DiagnosticsSection: View {
                         )
 
                         diagnosticsSummaryBlock(
+                            label: "建议先做",
+                            value: primaryRecommendation(summary: summary),
+                            detail: plan.primary.map { "优先按钮：\($0.title)" }
+                        )
+
+                        diagnosticsSummaryBlock(
                             label: "影响范围",
                             value: plan.impact,
-                            detail: nil
+                            detail: "按上面的顺序处理，通常不用自己进终端。"
                         )
 
                         if let rawError = gatewayIssue.rawError, !summary.gateway.reachable {
                             diagnosticsSummaryBlock(
-                                label: "原始错误",
+                                label: "技术原文",
                                 value: rawError,
-                                detail: "保留原始报错。"
+                                detail: "只有需要排查底层问题时才看这一段。"
                             )
                         }
 
@@ -1694,6 +1887,101 @@ private struct DiagnosticsSection: View {
                             }
                             if let tertiary = plan.tertiary {
                                 diagnosticsActionButton(tertiary)
+                            }
+                        }
+                    }
+                }
+
+                if let repairResult = store.lastSupportRepairResult {
+                    GridCard(
+                        title: "最近一次操作",
+                        subtitle: supportRepairTitle(repairResult.action),
+                        systemImage: repairResult.ok ? "checkmark.circle" : "exclamationmark.triangle",
+                        accent: repairResult.ok ? NativePalette.mint : NativePalette.rose
+                    ) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            diagnosticsSummaryBlock(
+                                label: "执行结果",
+                                value: repairResult.message,
+                                detail: "完成时间：\(formatDate(repairResult.summary.collectedAt))"
+                            )
+
+                            diagnosticsSummaryBlock(
+                                label: "操作结论",
+                                value: supportRepairSummary(repairResult),
+                                detail: supportRepairFollowUp(repairResult)
+                            )
+                        }
+                    }
+                }
+
+                GridCard(title: "OpenClaw 维护", subtitle: "直接维护本地 OpenClaw", systemImage: "wrench.adjustable", accent: NativePalette.accent) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        let service = summary.maintenance.gatewayService
+                        diagnosticsSummaryBlock(
+                            label: "维护建议",
+                            value: primaryRecommendation(summary: summary),
+                            detail: present(service.recommendation, fallback: "先校验配置，再决定是否执行官方修复或重装服务。")
+                        )
+
+                        diagnosticsSummaryBlock(
+                            label: "一句话结论",
+                            value: maintenanceHeadline(summary: summary),
+                            detail: !summary.maintenance.config.valid
+                                ? summary.maintenance.config.detail
+                                : present(service.issue, fallback: "本地配置和服务状态没有明显异常。")
+                        )
+
+                        TwoColumnFacts(items: [
+                            ("CLI 路径", present(summary.maintenance.cliPath)),
+                            ("状态目录", summary.maintenance.stateDir),
+                            ("配置状态", configValidationPresentation(summary.maintenance.config.valid).label),
+                            ("配置文件", summary.maintenance.config.path),
+                            ("服务健康", gatewayServicePresentation(service).label),
+                            ("Gateway 服务", service.status),
+                            ("运行时", present(service.runtimeStatus)),
+                            ("RPC 探测", present(service.probeStatus))
+                        ])
+
+                        diagnosticsSummaryBlock(
+                            label: "底层说明",
+                            value: !summary.maintenance.config.valid
+                                ? summary.maintenance.config.detail
+                                : present(service.issue, fallback: present(service.recommendation, fallback: "当前没有额外底层说明。")),
+                            detail: "这一段保留原始维护信息，只有需要进一步排查时再看。"
+                        )
+
+                        AdaptiveLine(spacing: 10) {
+                            ActionButton("校验配置", systemImage: "checklist", busy: store.isBusy("support:\(SupportRepairAction.validateConfig.rawValue)")) {
+                                store.repair(.validateConfig)
+                            }
+                            ActionButton("官方体检", systemImage: "stethoscope", busy: store.isBusy("support:\(SupportRepairAction.runOpenClawDoctor.rawValue)")) {
+                                store.repair(.runOpenClawDoctor)
+                            }
+                            ActionButton("官方修复", systemImage: "cross.case", busy: store.isBusy("support:\(SupportRepairAction.runOpenClawDoctorFix.rawValue)")) {
+                                store.repair(.runOpenClawDoctorFix)
+                            }
+                            ActionButton("重装服务", systemImage: "shippingbox.circle", busy: store.isBusy("support:\(SupportRepairAction.reinstallGatewayService.rawValue)")) {
+                                store.repair(.reinstallGatewayService)
+                            }
+                        }
+
+                        AdaptiveLine(spacing: 10) {
+                            Button("打开配置文件") {
+                                store.open(URL(fileURLWithPath: summary.maintenance.config.path))
+                            }
+                            .buttonStyle(NativeSecondaryButtonStyle())
+
+                            Button("打开状态目录") {
+                                store.open(URL(fileURLWithPath: summary.maintenance.stateDir))
+                            }
+                            .buttonStyle(NativeSecondaryButtonStyle())
+
+                            if let serviceFile = service.serviceFile {
+                                Button("打开服务文件") {
+                                    store.open(URL(fileURLWithPath: serviceFile))
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
                             }
                         }
                     }
@@ -1840,6 +2128,13 @@ private struct DiagnosticsSection: View {
                 Label(plan.title, systemImage: plan.systemImage)
             }
             .buttonStyle(NativeSecondaryButtonStyle(prominent: plan.prominent))
+        case let .openPath(path):
+            Button {
+                store.open(URL(fileURLWithPath: path))
+            } label: {
+                Label(plan.title, systemImage: plan.systemImage)
+            }
+            .buttonStyle(NativeSecondaryButtonStyle(prominent: plan.prominent))
         }
     }
 
@@ -1879,6 +2174,7 @@ private struct DeploymentSection: View {
             )
 
             if let runtime = store.runtime {
+                let hasCodexCompanion = store.profiles.contains { $0.companionRuntimeKind == "codex" }
                 VStack(alignment: .leading, spacing: 18) {
                     GridCard(title: "兼容性", subtitle: "当前支持范围", systemImage: "network", accent: NativePalette.accent) {
                         TwoColumnFacts(items: [
@@ -1894,19 +2190,27 @@ private struct DeploymentSection: View {
                     GridCard(title: "命令", subtitle: "常用入口", systemImage: "terminal", accent: NativePalette.mint) {
                         VStack(alignment: .leading, spacing: 12) {
                             CommandBlock(title: "OpenClaw", value: runtime.compatibility.wrapperCommand)
-                            CommandBlock(title: "Codex", value: runtime.compatibility.codexWrapperCommand)
+                            if hasCodexCompanion {
+                                CommandBlock(title: "Codex companion", value: runtime.compatibility.codexWrapperCommand)
+                            }
                         }
                     }
 
                     GridCard(title: "目录", subtitle: "当前使用的路径", systemImage: "shippingbox", accent: NativePalette.amber) {
-                        TwoColumnFacts(items: [
-                            ("OpenClaw Home", runtime.roots.openclawHomeDir),
-                            ("可选 Codex Home", runtime.roots.codexHomeDir),
-                            ("默认状态目录", runtime.roots.defaultOpenClawStateDir),
-                            ("默认 Codex", runtime.roots.defaultCodexHome),
-                            ("Manager 状态目录", runtime.roots.managerDir),
-                            ("Runtime 目录", present(store.localSnapshot.runtimeRootPath))
-                        ])
+                        let items: [(String, String)] = {
+                            var items: [(String, String)] = [
+                                ("OpenClaw Home", runtime.roots.openclawHomeDir),
+                                ("默认状态目录", runtime.roots.defaultOpenClawStateDir),
+                                ("Manager 状态目录", runtime.roots.managerDir),
+                                ("Runtime 目录", present(store.localSnapshot.runtimeRootPath))
+                            ]
+                            if hasCodexCompanion {
+                                items.insert(("可选 Codex Home", runtime.roots.codexHomeDir), at: 1)
+                                items.insert(("默认 Codex", runtime.roots.defaultCodexHome), at: 3)
+                            }
+                            return items
+                        }()
+                        TwoColumnFacts(items: items)
                     }
                 }
             } else {
