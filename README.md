@@ -11,6 +11,24 @@ OpenClaw Manager Native 是面向 macOS 的 OpenClaw 本地管理桌面版。
 
 当前版本：`1.0.5`
 
+## English
+
+OpenClaw Manager Native is a macOS desktop app for managing local OpenClaw setups.
+
+It is designed to:
+
+- manage `.openclaw` and `.openclaw-*` profiles
+- inspect and repair local OpenClaw state from a native UI
+- restart services and run diagnostics without dropping into the terminal
+- ship as a distributable `.app`, `.dmg`, `.pkg`, and release bundle
+
+Architecture at a glance:
+
+- Swift native shell for lifecycle, windowing, menu bar, and local runtime management
+- SwiftUI-based interface for profile management and diagnostics
+- bundled Go daemon for local APIs, provider-aware profile discovery, health checks, and repair actions
+- bundled Go watchdog for optional gateway recovery and stability protection
+
 ## 技术架构
 
 当前仓库已经不是旧的 `WKWebView + Node runtime` 方案，实际结构如下：
