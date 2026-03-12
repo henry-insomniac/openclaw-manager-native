@@ -53,6 +53,35 @@ http://127.0.0.1:3311
 - 系统概览
 - 运行时自检
 
+### `GET /api/machine/summary`
+
+作用：
+
+- 返回轻量机器监控摘要
+- 聚合 CPU、内存、swap、磁盘剩余、网络吞吐，以及 manager / watchdog 进程状态
+- 即使本机暂时没有 OpenClaw，也能返回 machine-only 模式需要的状态
+
+查询参数：
+
+- `fresh=1`
+  - 跳过短 TTL 缓存，强制重新采样
+
+默认行为：
+
+- 不带 `fresh=1` 时走 daemon 的短缓存
+- 适合监控页高频轮询，不会触发重诊断
+
+返回字段重点：
+
+- `openclaw`: 本机是否发现 OpenClaw CLI，以及发现路径 / 来源
+- `cpu`: 当前机器 CPU 活跃度，以及 `user / system / idle` 口径
+- `memory`: 内存结构和压力口径，包含 `wired / active / cache / free / other / compressed`
+- `swap`: 当前 swap 总量、已用量和占比
+- `disk`: 当前系统盘路径、总量、已用量和剩余量
+- `network`: 主网卡、当前上下行速率、累计收发流量
+- `processes.manager` / `processes.watchdog`: manager 与 watchdog 的运行状态、PID、CPU、RSS 和运行时长
+- `topProcesses`: 当前按 CPU 排序的前 10 个进程，包含进程名、PID、CPU、RSS、运行时长和完整命令行
+
 ### `PATCH /api/openclaw/settings`
 
 作用：
@@ -257,6 +286,10 @@ http://127.0.0.1:3311
 ### 诊断页常驻刷新
 
 1. `GET /api/support/summary`
+
+### 监控页常驻刷新
+
+1. `GET /api/machine/summary`
 
 ### 诊断页手动强刷
 

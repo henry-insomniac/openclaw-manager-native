@@ -49,6 +49,7 @@ const (
 	supportEventsCacheTTL       = 45 * time.Second
 	supportEnvironmentCacheTTL  = 2 * time.Minute
 	supportMaintenanceCacheTTL  = 2 * time.Minute
+	machineSummaryCacheTTL      = 3 * time.Second
 	oauthTimeout                = 10 * time.Minute
 	legacyDefaultPollIntervalMs = 60_000
 	minProbeIntervalMs          = 30_000
@@ -72,6 +73,10 @@ var (
 	profileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 	timestampPattern   = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}T\S+)`)
 	pmsetPattern       = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4})\s+(Sleep|Wake|DarkWake)`)
+	psProcessPattern   = regexp.MustCompile(`^\s*(\d+)\s+([0-9.]+)\s+(\d+)\s+(\S+)\s+(.*)$`)
+	vmStatLinePattern  = regexp.MustCompile(`^([^:]+):\s+([0-9]+)\.`)
+	swapUsagePattern   = regexp.MustCompile(`(?i)(total|used|free)\s*=\s*([0-9.]+)([KMGT])`)
+	topCPUPattern      = regexp.MustCompile(`CPU usage:\s+([0-9.]+)% user,\s+([0-9.]+)% sys,\s+([0-9.]+)% idle`)
 )
 
 type App struct {
@@ -97,19 +102,23 @@ type App struct {
 	opMu sync.Mutex
 	mu   sync.Mutex
 
-	loginFlows          map[string]*PendingLoginFlow
-	loginFlowIDsByState map[string]string
-	callbackServer      *http.Server
-	automationTimer     *time.Timer
-	automationRunning   bool
-	usageCache          map[string]cachedUsageSnapshot
-	stateDirCache       map[string]string
-	stateDirCacheAt     time.Time
-	supportSummaryCache     *cachedSupportSummary
-	supportGatewayCache     *cachedSupportGateway
-	supportEventsCache      *cachedSupportEvents
-	supportEnvironmentCache *cachedSupportEnvironment
-	supportMaintenanceCache *cachedSupportMaintenance
+	loginFlows               map[string]*PendingLoginFlow
+	loginFlowIDsByState      map[string]string
+	callbackServer           *http.Server
+	automationTimer          *time.Timer
+	automationRunning        bool
+	usageCache               map[string]cachedUsageSnapshot
+	stateDirCache            map[string]string
+	stateDirCacheAt          time.Time
+	supportSummaryCache      *cachedSupportSummary
+	supportGatewayCache      *cachedSupportGateway
+	supportEventsCache       *cachedSupportEvents
+	supportEnvironmentCache  *cachedSupportEnvironment
+	supportMaintenanceCache  *cachedSupportMaintenance
+	machineSummaryCache      *cachedMachineSummary
+	supportSummaryRefreshing bool
+	machineSummaryRefreshing bool
+	lastNetworkSample        *machineNetworkCounters
 }
 
 type cachedUsageSnapshot struct {
@@ -140,6 +149,23 @@ type cachedSupportEnvironment struct {
 type cachedSupportMaintenance struct {
 	Maintenance SupportMaintenance
 	FetchedAt   time.Time
+}
+
+type cachedMachineSummary struct {
+	Summary   MachineSummary
+	FetchedAt time.Time
+}
+
+type machineNetworkCounters struct {
+	Interface   string
+	Received    uint64
+	Sent        uint64
+	CollectedAt time.Time
+}
+
+type machineInterfaceCounters struct {
+	Received uint64
+	Sent     uint64
 }
 
 type ManagerStateFile struct {
@@ -472,6 +498,93 @@ type SupportRepairResult struct {
 	Summary SupportSummary `json:"summary"`
 }
 
+type MachineSummary struct {
+	CollectedAt  string              `json:"collectedAt"`
+	OpenClaw     MachineOpenClaw     `json:"openclaw"`
+	CPU          MachineCPU          `json:"cpu"`
+	Memory       MachineMemory       `json:"memory"`
+	Swap         MachineSwap         `json:"swap"`
+	Disk         MachineDisk         `json:"disk"`
+	Network      MachineNetwork      `json:"network"`
+	Processes    MachineProcessGroup `json:"processes"`
+	TopProcesses []MachineTopProcess `json:"topProcesses"`
+}
+
+type MachineOpenClaw struct {
+	Available bool    `json:"available"`
+	Path      *string `json:"path,omitempty"`
+	Source    string  `json:"source"`
+}
+
+type MachineCPU struct {
+	ActivePercent int `json:"activePercent"`
+	UserPercent   int `json:"userPercent"`
+	SystemPercent int `json:"systemPercent"`
+	IdlePercent   int `json:"idlePercent"`
+	LogicalCores  int `json:"logicalCores"`
+}
+
+type MachineMemory struct {
+	TotalBytes      int64  `json:"totalBytes"`
+	UsedBytes       int64  `json:"usedBytes"`
+	AvailableBytes  int64  `json:"availableBytes"`
+	WiredBytes      int64  `json:"wiredBytes"`
+	ActiveBytes     int64  `json:"activeBytes"`
+	CachedBytes     int64  `json:"cachedBytes"`
+	FreeBytes       int64  `json:"freeBytes"`
+	OtherBytes      int64  `json:"otherBytes"`
+	CompressedBytes int64  `json:"compressedBytes"`
+	UsedPercent     int    `json:"usedPercent"`
+	PressurePercent int    `json:"pressurePercent"`
+	Pressure        string `json:"pressure"`
+}
+
+type MachineSwap struct {
+	TotalBytes  int64 `json:"totalBytes"`
+	UsedBytes   int64 `json:"usedBytes"`
+	FreeBytes   int64 `json:"freeBytes"`
+	UsedPercent int   `json:"usedPercent"`
+}
+
+type MachineDisk struct {
+	Path        string `json:"path"`
+	TotalBytes  int64  `json:"totalBytes"`
+	UsedBytes   int64  `json:"usedBytes"`
+	FreeBytes   int64  `json:"freeBytes"`
+	UsedPercent int    `json:"usedPercent"`
+}
+
+type MachineNetwork struct {
+	PrimaryInterface    *string `json:"primaryInterface,omitempty"`
+	ReceivedBytesPerSec *int64  `json:"receivedBytesPerSec,omitempty"`
+	SentBytesPerSec     *int64  `json:"sentBytesPerSec,omitempty"`
+	TotalReceivedBytes  int64   `json:"totalReceivedBytes"`
+	TotalSentBytes      int64   `json:"totalSentBytes"`
+}
+
+type MachineProcessGroup struct {
+	Manager  MachineProcessSnapshot `json:"manager"`
+	Watchdog MachineProcessSnapshot `json:"watchdog"`
+}
+
+type MachineProcessSnapshot struct {
+	Running       bool     `json:"running"`
+	PID           *int     `json:"pid,omitempty"`
+	CPUPercent    *float64 `json:"cpuPercent,omitempty"`
+	RSSBytes      *int64   `json:"rssBytes,omitempty"`
+	UptimeSeconds *int     `json:"uptimeSeconds,omitempty"`
+	Command       *string  `json:"command,omitempty"`
+}
+
+type MachineTopProcess struct {
+	Name          string  `json:"name"`
+	PID           int     `json:"pid"`
+	CPUPercent    float64 `json:"cpuPercent"`
+	RSSBytes      int64   `json:"rssBytes"`
+	UptimeSeconds int     `json:"uptimeSeconds"`
+	Command       string  `json:"command"`
+}
+
 type AuthStore struct {
 	Version    int                       `json:"version"`
 	Profiles   map[string]map[string]any `json:"profiles"`
@@ -676,6 +789,7 @@ func (app *App) start() error {
 	mux.HandleFunc("GET /api/health", app.handleHealth)
 	mux.HandleFunc("GET /api/openclaw/manager", app.handleManagerSummary)
 	mux.HandleFunc("GET /api/openclaw/system", app.handleRuntimeOverview)
+	mux.HandleFunc("GET /api/machine/summary", app.handleMachineSummary)
 	mux.HandleFunc("PATCH /api/openclaw/settings", app.handleUpdateSettings)
 	mux.HandleFunc("POST /api/openclaw/automation/tick", app.handleAutomationTick)
 	mux.HandleFunc("POST /api/openclaw/profiles", app.handleCreateProfile)
@@ -737,6 +851,15 @@ func (app *App) handleRuntimeOverview(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, overview)
+}
+
+func (app *App) handleMachineSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := app.buildMachineSummary(r.URL.Query().Get("fresh") == "1")
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (app *App) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -3152,17 +3275,441 @@ func (app *App) expirePendingLoginFlowsLocked() {
 	}
 }
 
-func (app *App) buildSupportSummary(fresh bool) (SupportSummary, error) {
-	if !fresh {
-		app.mu.Lock()
-		if app.supportSummaryCache != nil && time.Since(app.supportSummaryCache.FetchedAt) <= supportSummaryCacheTTL {
-			cached := app.supportSummaryCache.Summary
-			app.mu.Unlock()
-			return cached, nil
-		}
-		app.mu.Unlock()
+func (app *App) buildMachineSummary(fresh bool) (MachineSummary, error) {
+	if fresh {
+		return app.computeMachineSummary(true)
 	}
 
+	var cached *cachedMachineSummary
+	shouldRefresh := false
+	app.mu.Lock()
+	if app.machineSummaryCache != nil {
+		copy := *app.machineSummaryCache
+		cached = &copy
+		if time.Since(app.machineSummaryCache.FetchedAt) > machineSummaryCacheTTL && !app.machineSummaryRefreshing {
+			app.machineSummaryRefreshing = true
+			shouldRefresh = true
+		}
+	}
+	app.mu.Unlock()
+
+	if shouldRefresh {
+		go app.refreshMachineSummaryCache()
+	}
+	if cached != nil {
+		return cached.Summary, nil
+	}
+
+	return app.computeMachineSummary(false)
+}
+
+func (app *App) computeMachineSummary(fresh bool) (MachineSummary, error) {
+	now := time.Now()
+	var openclaw MachineOpenClaw
+	var cpu MachineCPU
+	var memory MachineMemory
+	var swap MachineSwap
+	var disk MachineDisk
+	var network MachineNetwork
+	var processes MachineProcessGroup
+	var topProcesses []MachineTopProcess
+
+	var wg sync.WaitGroup
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		openclaw = app.inspectOpenClawAvailability()
+	}()
+	go func() {
+		defer wg.Done()
+		cpu, processes, topProcesses = app.collectMachineProcessMetrics()
+	}()
+	go func() {
+		defer wg.Done()
+		memory, swap = app.collectMachineMemoryMetrics()
+	}()
+	go func() {
+		defer wg.Done()
+		disk = app.collectMachineDiskMetrics()
+	}()
+	go func() {
+		defer wg.Done()
+		network = app.collectMachineNetworkMetrics(now)
+	}()
+	wg.Wait()
+
+	memory.Pressure = machinePressureLevel(memory.PressurePercent, swap.UsedPercent)
+	summary := MachineSummary{
+		CollectedAt:  now.UTC().Format(time.RFC3339),
+		OpenClaw:     openclaw,
+		CPU:          cpu,
+		Memory:       memory,
+		Swap:         swap,
+		Disk:         disk,
+		Network:      network,
+		Processes:    processes,
+		TopProcesses: topProcesses,
+	}
+
+	app.mu.Lock()
+	app.machineSummaryCache = &cachedMachineSummary{
+		Summary:   summary,
+		FetchedAt: time.Now(),
+	}
+	app.mu.Unlock()
+
+	return summary, nil
+}
+
+func (app *App) refreshMachineSummaryCache() {
+	defer func() {
+		app.mu.Lock()
+		app.machineSummaryRefreshing = false
+		app.mu.Unlock()
+	}()
+
+	_, _ = app.computeMachineSummary(false)
+}
+
+func (app *App) inspectOpenClawAvailability() MachineOpenClaw {
+	explicit := strings.TrimSpace(os.Getenv("OPENCLAW_BIN"))
+	if explicit != "" {
+		if resolved, ok := resolveBinaryPath(explicit); ok {
+			return MachineOpenClaw{Available: true, Path: &resolved, Source: "env"}
+		}
+		return MachineOpenClaw{Available: false, Path: nullableString(explicit), Source: "env"}
+	}
+
+	local := filepath.Join(app.homeDir, ".local", "bin", "openclaw")
+	if pathExists(local) {
+		return MachineOpenClaw{Available: true, Path: &local, Source: "local"}
+	}
+
+	if resolved, ok := resolveBinaryPath("openclaw"); ok {
+		return MachineOpenClaw{Available: true, Path: &resolved, Source: "path"}
+	}
+
+	return MachineOpenClaw{Available: false, Source: "missing"}
+}
+
+func (app *App) collectTopCPU(logicalCores int) MachineCPU {
+	cpu := MachineCPU{
+		ActivePercent: 0,
+		UserPercent:   0,
+		SystemPercent: 0,
+		IdlePercent:   0,
+		LogicalCores:  logicalCores,
+	}
+
+	result := runCommand("top", []string{"-l", "1", "-n", "0"}, 8*time.Second)
+	line := ""
+	for _, rawLine := range strings.Split(result.Stdout, "\n") {
+		rawLine = strings.TrimSpace(rawLine)
+		if strings.HasPrefix(rawLine, "CPU usage:") {
+			line = rawLine
+			break
+		}
+	}
+	if line == "" {
+		return cpu
+	}
+
+	matches := topCPUPattern.FindStringSubmatch(line)
+	if len(matches) != 4 {
+		return cpu
+	}
+	userPercent, errUser := strconv.ParseFloat(matches[1], 64)
+	systemPercent, errSystem := strconv.ParseFloat(matches[2], 64)
+	idlePercent, errIdle := strconv.ParseFloat(matches[3], 64)
+	if errUser != nil || errSystem != nil || errIdle != nil {
+		return cpu
+	}
+
+	cpu.UserPercent = clampPercentFloat(userPercent)
+	cpu.SystemPercent = clampPercentFloat(systemPercent)
+	cpu.IdlePercent = clampPercentFloat(idlePercent)
+	cpu.ActivePercent = clampPercentFloat(userPercent + systemPercent)
+	return cpu
+}
+
+func (app *App) collectMachineProcessMetrics() (MachineCPU, MachineProcessGroup, []MachineTopProcess) {
+	logicalCores := 1
+	if parsed, err := syscall.SysctlUint32("hw.logicalcpu"); err == nil && parsed > 0 {
+		logicalCores = int(parsed)
+	}
+
+	cpu := app.collectTopCPU(logicalCores)
+	result := runCommand("ps", []string{"-axo", "pid=,pcpu=,rss=,etime=,command="}, 8*time.Second)
+	if !result.OK && strings.TrimSpace(result.Stdout) == "" {
+		return cpu, MachineProcessGroup{}, nil
+	}
+
+	var manager MachineProcessSnapshot
+	var watchdog MachineProcessSnapshot
+	topProcesses := make([]MachineTopProcess, 0, 32)
+	for _, rawLine := range strings.Split(result.Stdout, "\n") {
+		pid, processCPU, rssBytes, uptimeSeconds, command, ok := parseMachineProcessLine(rawLine)
+		if !ok {
+			continue
+		}
+
+		snapshot := MachineProcessSnapshot{
+			Running:       true,
+			PID:           ptr(pid),
+			CPUPercent:    nullableFloat64(processCPU),
+			RSSBytes:      nullableInt64(rssBytes),
+			UptimeSeconds: nullableInt(uptimeSeconds),
+			Command:       nullableString(command),
+		}
+
+		switch {
+		case matchesProcessCommand(command, "openclaw-manager-daemon"):
+			if shouldReplaceProcessSnapshot(manager, snapshot) {
+				manager = snapshot
+			}
+		case matchesProcessCommand(command, "openclaw-watchdog"):
+			if shouldReplaceProcessSnapshot(watchdog, snapshot) {
+				watchdog = snapshot
+			}
+		}
+
+		topProcesses = append(topProcesses, MachineTopProcess{
+			Name:          processDisplayName(command),
+			PID:           pid,
+			CPUPercent:    processCPU,
+			RSSBytes:      rssBytes,
+			UptimeSeconds: uptimeSeconds,
+			Command:       command,
+		})
+	}
+
+	sort.Slice(topProcesses, func(i, j int) bool {
+		if math.Abs(topProcesses[i].CPUPercent-topProcesses[j].CPUPercent) > 0.001 {
+			return topProcesses[i].CPUPercent > topProcesses[j].CPUPercent
+		}
+		if topProcesses[i].RSSBytes != topProcesses[j].RSSBytes {
+			return topProcesses[i].RSSBytes > topProcesses[j].RSSBytes
+		}
+		return topProcesses[i].PID < topProcesses[j].PID
+	})
+	if len(topProcesses) > 10 {
+		topProcesses = append([]MachineTopProcess(nil), topProcesses[:10]...)
+	}
+
+	return cpu, MachineProcessGroup{
+		Manager:  manager,
+		Watchdog: watchdog,
+	}, topProcesses
+}
+
+func (app *App) collectMachineMemoryMetrics() (MachineMemory, MachineSwap) {
+	totalBytes, _ := strconv.ParseInt(strings.TrimSpace(syscallString("hw.memsize")), 10, 64)
+
+	pageSize := int64(0)
+	pageCounts := map[string]int64{}
+	vmStat := runCommand("vm_stat", nil, 8*time.Second)
+	for _, rawLine := range strings.Split(vmStat.Stdout, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if pageSize == 0 {
+			pageSize = parseVMStatPageSize(line)
+		}
+		if key, value, ok := parseVMStatLine(line); ok {
+			pageCounts[key] = value
+		}
+	}
+	if pageSize <= 0 {
+		pageSize = 4096
+	}
+
+	freePages := pageCounts["Pages free"] + pageCounts["Pages speculative"]
+	activePages := pageCounts["Pages active"]
+	inactivePages := pageCounts["Pages inactive"] + pageCounts["Pages purgeable"]
+	wiredPages := pageCounts["Pages wired down"]
+	freeBytes := freePages * pageSize
+	activeBytes := activePages * pageSize
+	cachedBytes := inactivePages * pageSize
+	wiredBytes := wiredPages * pageSize
+	availableBytes := (freePages + inactivePages) * pageSize
+	compressedBytes := pageCounts["Pages occupied by compressor"] * pageSize
+
+	usedBytes := totalBytes - availableBytes
+	if usedBytes < 0 {
+		usedBytes = 0
+	}
+	if totalBytes > 0 && usedBytes > totalBytes {
+		usedBytes = totalBytes
+	}
+	if totalBytes > 0 && availableBytes > totalBytes {
+		availableBytes = totalBytes - usedBytes
+	}
+	otherBytes := totalBytes - wiredBytes - activeBytes - cachedBytes - freeBytes
+	if otherBytes < 0 {
+		otherBytes = 0
+	}
+	pressureBytes := wiredBytes + activeBytes
+
+	swap := parseSwapUsage(syscallString("vm.swapusage"))
+	memory := MachineMemory{
+		TotalBytes:      totalBytes,
+		UsedBytes:       usedBytes,
+		AvailableBytes:  availableBytes,
+		WiredBytes:      wiredBytes,
+		ActiveBytes:     activeBytes,
+		CachedBytes:     cachedBytes,
+		FreeBytes:       freeBytes,
+		OtherBytes:      otherBytes,
+		CompressedBytes: compressedBytes,
+		UsedPercent:     percentFromBytes(usedBytes, totalBytes),
+		PressurePercent: percentFromBytes(pressureBytes, totalBytes),
+	}
+	return memory, swap
+}
+
+func (app *App) collectMachineDiskMetrics() MachineDisk {
+	path := app.homeDir
+	if strings.TrimSpace(path) == "" {
+		path = "/"
+	}
+
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return MachineDisk{Path: path}
+	}
+
+	totalBytes := int64(stat.Blocks) * int64(stat.Bsize)
+	freeBytes := int64(stat.Bavail) * int64(stat.Bsize)
+	usedBytes := totalBytes - freeBytes
+	if usedBytes < 0 {
+		usedBytes = 0
+	}
+
+	return MachineDisk{
+		Path:        path,
+		TotalBytes:  totalBytes,
+		UsedBytes:   usedBytes,
+		FreeBytes:   freeBytes,
+		UsedPercent: percentFromBytes(usedBytes, totalBytes),
+	}
+}
+
+func (app *App) collectMachineNetworkMetrics(now time.Time) MachineNetwork {
+	result := runCommand("netstat", []string{"-ibn"}, 8*time.Second)
+	if !result.OK && strings.TrimSpace(result.Stdout) == "" {
+		return MachineNetwork{}
+	}
+
+	byInterface := map[string]machineInterfaceCounters{}
+	for _, rawLine := range strings.Split(result.Stdout, "\n") {
+		fields := strings.Fields(strings.TrimSpace(rawLine))
+		if len(fields) < 10 {
+			continue
+		}
+		name := fields[0]
+		network := fields[2]
+		if name == "Name" || strings.HasPrefix(name, "lo") || strings.HasSuffix(name, "*") {
+			continue
+		}
+		if !strings.HasPrefix(network, "<Link#") {
+			continue
+		}
+
+		received, errIn := strconv.ParseUint(fields[6], 10, 64)
+		sent, errOut := strconv.ParseUint(fields[9], 10, 64)
+		if errIn != nil || errOut != nil {
+			continue
+		}
+		byInterface[name] = machineInterfaceCounters{Received: received, Sent: sent}
+	}
+
+	selectedInterface, selectedCounters := preferredNetworkInterface(byInterface)
+	if selectedInterface == "" {
+		return MachineNetwork{}
+	}
+
+	summary := MachineNetwork{
+		PrimaryInterface:   &selectedInterface,
+		TotalReceivedBytes: int64(selectedCounters.Received),
+		TotalSentBytes:     int64(selectedCounters.Sent),
+	}
+
+	app.mu.Lock()
+	previous := app.lastNetworkSample
+	app.lastNetworkSample = &machineNetworkCounters{
+		Interface:   selectedInterface,
+		Received:    selectedCounters.Received,
+		Sent:        selectedCounters.Sent,
+		CollectedAt: now,
+	}
+	app.mu.Unlock()
+
+	if previous == nil || previous.Interface != selectedInterface {
+		return summary
+	}
+
+	elapsedSeconds := now.Sub(previous.CollectedAt).Seconds()
+	if elapsedSeconds <= 0.25 {
+		return summary
+	}
+
+	if selectedCounters.Received >= previous.Received {
+		rx := int64(math.Round(float64(selectedCounters.Received-previous.Received) / elapsedSeconds))
+		summary.ReceivedBytesPerSec = nullableInt64(rx)
+	}
+	if selectedCounters.Sent >= previous.Sent {
+		tx := int64(math.Round(float64(selectedCounters.Sent-previous.Sent) / elapsedSeconds))
+		summary.SentBytesPerSec = nullableInt64(tx)
+	}
+
+	return summary
+}
+
+func machinePressureLevel(memoryPressurePercent, swapUsedPercent int) string {
+	switch {
+	case memoryPressurePercent >= 85:
+		return "high"
+	case memoryPressurePercent >= 65:
+		return "watch"
+	case memoryPressurePercent >= 45 && swapUsedPercent >= 50:
+		return "watch"
+	case swapUsedPercent >= 80:
+		return "watch"
+	default:
+		return "normal"
+	}
+}
+
+func (app *App) buildSupportSummary(fresh bool) (SupportSummary, error) {
+	if fresh {
+		return app.computeSupportSummary(true)
+	}
+
+	var cached *cachedSupportSummary
+	shouldRefresh := false
+	app.mu.Lock()
+	if app.supportSummaryCache != nil {
+		copy := *app.supportSummaryCache
+		cached = &copy
+		if time.Since(app.supportSummaryCache.FetchedAt) > supportSummaryCacheTTL && !app.supportSummaryRefreshing {
+			app.supportSummaryRefreshing = true
+			shouldRefresh = true
+		}
+	}
+	app.mu.Unlock()
+
+	if shouldRefresh {
+		go app.refreshSupportSummaryCache()
+	}
+	if cached != nil {
+		return cached.Summary, nil
+	}
+
+	return app.computeSupportSummary(false)
+}
+
+func (app *App) computeSupportSummary(fresh bool) (SupportSummary, error) {
 	now := time.Now()
 	var gateway SupportGateway
 	var events []SupportLogEvent
@@ -3235,7 +3782,7 @@ func (app *App) buildSupportSummary(fresh bool) (SupportSummary, error) {
 	case "offline":
 		recommendation = explainGatewayFailure(gateway.Error)
 		if len(environment.RiskySignals) > 0 {
-			recommendation += " 当前环境风险：" + environment.RiskySignals[0]
+			recommendation += " 当前环境因素：" + environment.RiskySignals[0]
 		}
 	case "unstable":
 		recommendation = "最近出现断连，先执行“一键修复”。"
@@ -3305,6 +3852,16 @@ func (app *App) buildSupportSummary(fresh bool) (SupportSummary, error) {
 	app.mu.Unlock()
 
 	return summary, nil
+}
+
+func (app *App) refreshSupportSummaryCache() {
+	defer func() {
+		app.mu.Lock()
+		app.supportSummaryRefreshing = false
+		app.mu.Unlock()
+	}()
+
+	_, _ = app.computeSupportSummary(false)
 }
 
 func (app *App) getSupportMaintenance(fresh bool) SupportMaintenance {
@@ -3976,22 +4533,32 @@ func (app *App) getEnvironmentSummary(now time.Time, fresh bool) SupportEnvironm
 			riskySignals = append(riskySignals, "最近有休眠/唤醒记录，长连接在睡眠恢复后更容易断开。")
 		}
 	}
+	networkAnomaly := primaryInterface == ""
 	if primaryInterface == "" {
 		riskySignals = append(riskySignals, "未识别到默认网络出口，当前网络环境异常。")
 	}
 
 	riskLevel := "none"
-	if len(riskySignals) >= 2 {
+	if networkAnomaly {
 		riskLevel = "high"
-	} else if len(riskySignals) == 1 {
+	} else if (proxyEnabled && vpnLikelyActive) || len(riskySignals) >= 2 {
 		riskLevel = "watch"
+	} else if len(riskySignals) == 1 {
+		riskLevel = "notice"
 	}
 
-	recommendation := "当前没有检测到明显的环境风险。"
-	if len(riskySignals) > 0 {
-		if riskLevel == "high" {
-			recommendation = "当前环境不利于 Discord 长连接，先处理代理、VPN 或睡眠恢复因素。"
-		} else {
+	recommendation := "当前没有检测到明显的环境因素。"
+	switch riskLevel {
+	case "high":
+		recommendation = "当前网络出口识别异常，先检查本机网络连接，再看 Discord 是否恢复。"
+	case "watch":
+		if proxyEnabled && vpnLikelyActive {
+			recommendation = "检测到代理和隧道同时存在。如果继续断连，先关闭其中一个再复测。"
+		} else if len(riskySignals) > 0 {
+			recommendation = "检测到多条环境信号。如果继续断连，再优先排查：" + riskySignals[0]
+		}
+	case "notice":
+		if len(riskySignals) > 0 {
 			recommendation = riskySignals[0]
 		}
 	}
@@ -4629,6 +5196,249 @@ func anyInt(value any) int {
 	return 0
 }
 
+func resolveBinaryPath(value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	if pathExists(value) {
+		return value, true
+	}
+	resolved, err := exec.LookPath(value)
+	if err != nil {
+		return "", false
+	}
+	return resolved, true
+}
+
+func syscallString(name string) string {
+	result := runCommand("sysctl", []string{"-n", name}, 8*time.Second)
+	if !result.OK && strings.TrimSpace(result.Stdout) == "" {
+		return ""
+	}
+	return strings.TrimSpace(result.Stdout)
+}
+
+func parseMachineProcessLine(line string) (pid int, cpuPercent float64, rssBytes int64, uptimeSeconds int, command string, ok bool) {
+	matches := psProcessPattern.FindStringSubmatch(line)
+	if len(matches) != 6 {
+		return 0, 0, 0, 0, "", false
+	}
+
+	parsedPID, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0, 0, 0, 0, "", false
+	}
+	parsedCPU, err := strconv.ParseFloat(matches[2], 64)
+	if err != nil {
+		return 0, 0, 0, 0, "", false
+	}
+	parsedRSS, err := strconv.ParseInt(matches[3], 10, 64)
+	if err != nil {
+		return 0, 0, 0, 0, "", false
+	}
+	parsedUptime, ok := parseElapsedSeconds(matches[4])
+	if !ok {
+		return 0, 0, 0, 0, "", false
+	}
+
+	command = strings.TrimSpace(matches[5])
+	if command == "" {
+		return 0, 0, 0, 0, "", false
+	}
+
+	return parsedPID, parsedCPU, parsedRSS * 1024, parsedUptime, command, true
+}
+
+func processDisplayName(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "未知进程"
+	}
+	base := filepath.Base(command)
+	if strings.TrimSpace(base) == "" || base == "." || base == "/" {
+		return command
+	}
+	return base
+}
+
+func parseElapsedSeconds(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+
+	dayParts := strings.SplitN(value, "-", 2)
+	days := 0
+	clock := value
+	if len(dayParts) == 2 {
+		parsedDays, err := strconv.Atoi(dayParts[0])
+		if err != nil {
+			return 0, false
+		}
+		days = parsedDays
+		clock = dayParts[1]
+	}
+
+	parts := strings.Split(clock, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, false
+	}
+
+	toInt := func(raw string) (int, bool) {
+		parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+		return parsed, err == nil
+	}
+
+	hours := 0
+	minutes := 0
+	seconds := 0
+	if len(parts) == 3 {
+		var ok bool
+		hours, ok = toInt(parts[0])
+		if !ok {
+			return 0, false
+		}
+		minutes, ok = toInt(parts[1])
+		if !ok {
+			return 0, false
+		}
+		seconds, ok = toInt(parts[2])
+		if !ok {
+			return 0, false
+		}
+	} else {
+		var ok bool
+		minutes, ok = toInt(parts[0])
+		if !ok {
+			return 0, false
+		}
+		seconds, ok = toInt(parts[1])
+		if !ok {
+			return 0, false
+		}
+	}
+
+	return (((days * 24) + hours) * 60 * 60) + (minutes * 60) + seconds, true
+}
+
+func matchesProcessCommand(command, suffix string) bool {
+	command = strings.TrimSpace(command)
+	suffix = strings.TrimSpace(suffix)
+	if command == "" || suffix == "" {
+		return false
+	}
+	if strings.HasSuffix(command, "/"+suffix) || command == suffix {
+		return true
+	}
+	base := filepath.Base(strings.Fields(command)[0])
+	return base == suffix
+}
+
+func shouldReplaceProcessSnapshot(current, candidate MachineProcessSnapshot) bool {
+	if !candidate.Running {
+		return false
+	}
+	if !current.Running {
+		return true
+	}
+	if derefInt(candidate.UptimeSeconds) != derefInt(current.UptimeSeconds) {
+		return derefInt(candidate.UptimeSeconds) > derefInt(current.UptimeSeconds)
+	}
+	return derefInt64(candidate.RSSBytes) > derefInt64(current.RSSBytes)
+}
+
+func parseVMStatPageSize(line string) int64 {
+	group := firstRegexGroup(line, `page size of ([0-9]+) bytes`)
+	if group == "" {
+		return 0
+	}
+	value, err := strconv.ParseInt(group, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
+}
+
+func parseVMStatLine(line string) (string, int64, bool) {
+	matches := vmStatLinePattern.FindStringSubmatch(line)
+	if len(matches) != 3 {
+		return "", 0, false
+	}
+	value, err := strconv.ParseInt(matches[2], 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return strings.TrimSpace(matches[1]), value, true
+}
+
+func parseSwapUsage(value string) MachineSwap {
+	swap := MachineSwap{}
+	for _, match := range swapUsagePattern.FindAllStringSubmatch(strings.TrimSpace(value), -1) {
+		if len(match) != 4 {
+			continue
+		}
+		bytes := parseHumanBytes(match[2], match[3])
+		switch strings.ToLower(match[1]) {
+		case "total":
+			swap.TotalBytes = bytes
+		case "used":
+			swap.UsedBytes = bytes
+		case "free":
+			swap.FreeBytes = bytes
+		}
+	}
+	swap.UsedPercent = percentFromBytes(swap.UsedBytes, swap.TotalBytes)
+	return swap
+}
+
+func parseHumanBytes(value, unit string) int64 {
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil {
+		return 0
+	}
+	multiplier := float64(1)
+	switch strings.ToUpper(strings.TrimSpace(unit)) {
+	case "T":
+		multiplier = 1024 * 1024 * 1024 * 1024
+	case "G":
+		multiplier = 1024 * 1024 * 1024
+	case "M":
+		multiplier = 1024 * 1024
+	case "K":
+		multiplier = 1024
+	}
+	return int64(math.Round(parsed * multiplier))
+}
+
+func percentFromBytes(usedBytes, totalBytes int64) int {
+	if usedBytes <= 0 || totalBytes <= 0 {
+		return 0
+	}
+	return clampPercentFloat((float64(usedBytes) / float64(totalBytes)) * 100)
+}
+
+func preferredNetworkInterface(byInterface map[string]machineInterfaceCounters) (string, machineInterfaceCounters) {
+	bestName := ""
+	bestCounters := machineInterfaceCounters{}
+	bestTotal := uint64(0)
+	for name, snapshot := range byInterface {
+		total := snapshot.Received + snapshot.Sent
+		if total == 0 {
+			continue
+		}
+		if total > bestTotal || (total == bestTotal && name < bestName) {
+			bestName = name
+			bestCounters = machineInterfaceCounters{
+				Received: snapshot.Received,
+				Sent:     snapshot.Sent,
+			}
+			bestTotal = total
+		}
+	}
+	return bestName, bestCounters
+}
+
 func anyStringOrDefault(value any, fallback string) string {
 	if text := strings.TrimSpace(anyString(value)); text != "" {
 		return text
@@ -4645,6 +5455,20 @@ func nullableString(value string) *string {
 }
 
 func nullableInt(value int) *int {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+func nullableInt64(value int64) *int64 {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+func nullableFloat64(value float64) *float64 {
 	if value == 0 {
 		return nil
 	}
@@ -4709,6 +5533,13 @@ func derefString(value *string) string {
 }
 
 func derefInt(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func derefInt64(value *int64) int64 {
 	if value == nil {
 		return 0
 	}

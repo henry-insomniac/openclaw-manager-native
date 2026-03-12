@@ -87,6 +87,7 @@ enum RuntimeMode: String, Codable, Sendable {
 
 enum NativeSection: String, CaseIterable, Identifiable, Sendable {
     case overview
+    case monitor
     case profiles
     case settings
     case diagnostics
@@ -375,6 +376,153 @@ struct SupportRepairResult: Decodable, Equatable, Sendable {
     var summary: SupportSummary
 }
 
+struct MachineSummary: Decodable, Equatable, Sendable {
+    struct OpenClaw: Decodable, Equatable, Sendable {
+        var available: Bool
+        var path: String?
+        var source: String
+    }
+
+    struct CPU: Decodable, Equatable, Sendable {
+        var activePercent: Int
+        var userPercent: Int
+        var systemPercent: Int
+        var idlePercent: Int
+        var logicalCores: Int
+    }
+
+    struct Memory: Decodable, Equatable, Sendable {
+        var totalBytes: Int
+        var usedBytes: Int
+        var availableBytes: Int
+        var wiredBytes: Int
+        var activeBytes: Int
+        var cachedBytes: Int
+        var freeBytes: Int
+        var otherBytes: Int
+        var compressedBytes: Int
+        var usedPercent: Int
+        var pressurePercent: Int
+        var pressure: String
+    }
+
+    struct Swap: Decodable, Equatable, Sendable {
+        var totalBytes: Int
+        var usedBytes: Int
+        var freeBytes: Int
+        var usedPercent: Int
+    }
+
+    struct Disk: Decodable, Equatable, Sendable {
+        var path: String
+        var totalBytes: Int
+        var usedBytes: Int
+        var freeBytes: Int
+        var usedPercent: Int
+    }
+
+    struct Network: Decodable, Equatable, Sendable {
+        var primaryInterface: String?
+        var receivedBytesPerSec: Int?
+        var sentBytesPerSec: Int?
+        var totalReceivedBytes: Int
+        var totalSentBytes: Int
+    }
+
+    struct ProcessGroup: Decodable, Equatable, Sendable {
+        struct Snapshot: Decodable, Equatable, Sendable {
+            var running: Bool
+            var pid: Int?
+            var cpuPercent: Double?
+            var rssBytes: Int?
+            var uptimeSeconds: Int?
+            var command: String?
+        }
+
+        var manager: Snapshot
+        var watchdog: Snapshot
+    }
+
+    struct TopProcess: Decodable, Equatable, Identifiable, Sendable {
+        var name: String
+        var pid: Int
+        var cpuPercent: Double
+        var rssBytes: Int
+        var uptimeSeconds: Int
+        var command: String
+
+        var id: String { "\(pid)-\(command)" }
+    }
+
+    var collectedAt: String
+    var openClaw: OpenClaw
+    var cpu: CPU
+    var memory: Memory
+    var swap: Swap
+    var disk: Disk
+    var network: Network
+    var processes: ProcessGroup
+    var topProcesses: [TopProcess]
+
+    enum CodingKeys: String, CodingKey {
+        case collectedAt
+        case openClaw = "openclaw"
+        case cpu
+        case memory
+        case swap
+        case disk
+        case network
+        case processes
+        case topProcesses
+    }
+
+    init(
+        collectedAt: String,
+        openClaw: OpenClaw,
+        cpu: CPU,
+        memory: Memory,
+        swap: Swap,
+        disk: Disk,
+        network: Network,
+        processes: ProcessGroup,
+        topProcesses: [TopProcess]
+    ) {
+        self.collectedAt = collectedAt
+        self.openClaw = openClaw
+        self.cpu = cpu
+        self.memory = memory
+        self.swap = swap
+        self.disk = disk
+        self.network = network
+        self.processes = processes
+        self.topProcesses = topProcesses
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.collectedAt = try container.decode(String.self, forKey: .collectedAt)
+        self.openClaw = try container.decode(OpenClaw.self, forKey: .openClaw)
+        self.cpu = try container.decode(CPU.self, forKey: .cpu)
+        self.memory = try container.decode(Memory.self, forKey: .memory)
+        self.swap = try container.decode(Swap.self, forKey: .swap)
+        self.disk = try container.decode(Disk.self, forKey: .disk)
+        self.network = try container.decode(Network.self, forKey: .network)
+        self.processes = try container.decode(ProcessGroup.self, forKey: .processes)
+        self.topProcesses = try container.decodeIfPresent([TopProcess].self, forKey: .topProcesses) ?? []
+    }
+}
+
+struct MachineTrendSample: Equatable, Identifiable, Sendable {
+    var collectedAt: String
+    var cpuActivePercent: Double
+    var memoryPressurePercent: Double
+    var swapUsedPercent: Double
+    var receivedBytesPerSec: Double
+    var sentBytesPerSec: Double
+
+    var id: String { collectedAt }
+}
+
 struct NativeLocalSnapshot: Equatable, Sendable {
     var config: RuntimeConfig
     var runtimeRootPath: String?
@@ -413,18 +561,29 @@ struct NativeNotice: Equatable, Identifiable, Sendable {
 enum NativeRefreshScope: Sendable {
     case full
     case managerOnly
+    case monitorOnly
+    case supportOnly
 }
 
 struct NativeRefreshRequest: Sendable {
     var silent: Bool
     var scope: NativeRefreshScope
+    var busyKey: String?
 
     static func full(silent: Bool = false) -> NativeRefreshRequest {
-        NativeRefreshRequest(silent: silent, scope: .full)
+        NativeRefreshRequest(silent: silent, scope: .full, busyKey: nil)
     }
 
     static func managerOnly(silent: Bool = true) -> NativeRefreshRequest {
-        NativeRefreshRequest(silent: silent, scope: .managerOnly)
+        NativeRefreshRequest(silent: silent, scope: .managerOnly, busyKey: nil)
+    }
+
+    static func monitorOnly(silent: Bool = true) -> NativeRefreshRequest {
+        NativeRefreshRequest(silent: silent, scope: .monitorOnly, busyKey: nil)
+    }
+
+    static func supportOnly(silent: Bool = true) -> NativeRefreshRequest {
+        NativeRefreshRequest(silent: silent, scope: .supportOnly, busyKey: nil)
     }
 }
 
@@ -448,6 +607,7 @@ struct NativeAppActions: Sendable {
     var restartServices: @Sendable () -> Void = {}
     var supportRepair: @Sendable (SupportRepairAction) -> Void = { _ in }
     var openURL: @Sendable (URL) -> Void = { _ in }
+    var openActivityMonitor: @Sendable () -> Void = {}
     var openGatewayLog: @Sendable () -> Void = {}
     var openWatchdogLog: @Sendable () -> Void = {}
     var openWatchdogStateDirectory: @Sendable () -> Void = {}
@@ -456,12 +616,22 @@ struct NativeAppActions: Sendable {
 final class NativeAppStore: ObservableObject, @unchecked Sendable {
     @Published var summary: ManagerSummary?
     @Published var supportSummary: SupportSummary?
+    @Published var machineSummary: MachineSummary?
+    @Published var machineHistory: [MachineTrendSample] = []
     @Published var lastSupportRepairResult: SupportRepairResult?
     @Published var loginFlow: LoginFlowSnapshot?
     @Published var selectedSection: NativeSection = .overview {
         didSet {
-            guard started, oldValue != selectedSection, selectedSection == .diagnostics else { return }
-            actions.refreshAll(.full(silent: true))
+            guard started, oldValue != selectedSection else { return }
+            scheduleRefreshTimer()
+            switch selectedSection {
+            case .diagnostics:
+                actions.refreshAll(.full(silent: true))
+            case .monitor:
+                actions.refreshAll(.monitorOnly(silent: true))
+            default:
+                break
+            }
         }
     }
     @Published var selectedProfileName: String?
@@ -484,6 +654,8 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     private var started = false
     private var refreshTimer: Timer?
     private var loginTimer: Timer?
+    private var didResolveInitialLandingSection = false
+    private let maxMachineHistoryPoints = 72
 
     var profiles: [ManagedProfileSnapshot] {
         summary?.profiles ?? []
@@ -529,15 +701,24 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         loginTimer?.invalidate()
         loginTimer = nil
         started = false
+        didResolveInitialLandingSection = false
+        machineHistory = []
     }
 
     func scheduleRefreshTimer() {
         refreshTimer?.invalidate()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        let interval = selectedSection == .monitor ? 5.0 : 30.0
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let request: NativeRefreshRequest = self.selectedSection == .diagnostics
-                ? .full(silent: true)
-                : .managerOnly(silent: true)
+            let request: NativeRefreshRequest
+            switch self.selectedSection {
+            case .diagnostics:
+                request = .full(silent: true)
+            case .monitor:
+                request = .monitorOnly(silent: true)
+            default:
+                request = .managerOnly(silent: true)
+            }
             self.actions.refreshAll(request)
         }
     }
@@ -561,11 +742,28 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         localSnapshot = snapshot
     }
 
-    func applyRefresh(summary: ManagerSummary, supportSummary: SupportSummary?) {
+    func applyRefresh(summary: ManagerSummary, supportSummary: SupportSummary?, machineSummary: MachineSummary?) {
         self.summary = summary
-        self.supportSummary = supportSummary
+        self.supportSummary = supportSummary ?? self.supportSummary
+        if let machineSummary {
+            self.machineSummary = machineSummary
+            recordMachineHistory(machineSummary)
+        }
         isLoading = false
         syncSelectedProfile()
+        resolveInitialLandingSectionIfNeeded()
+    }
+
+    func applyMachineRefresh(_ machineSummary: MachineSummary) {
+        self.machineSummary = machineSummary
+        recordMachineHistory(machineSummary)
+        isLoading = false
+        resolveInitialLandingSectionIfNeeded()
+    }
+
+    func applySupportRefresh(_ supportSummary: SupportSummary) {
+        self.supportSummary = supportSummary
+        isLoading = false
     }
 
     func applyRefreshError(_ message: String, silent: Bool) {
@@ -578,7 +776,7 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     func applyLoginFlow(_ flow: LoginFlowSnapshot) {
         loginFlow = flow
         if flow.status != .pending {
-            actions.refreshAll(.full(silent: true))
+            actions.refreshAll(.managerOnly(silent: true))
         }
         restartLoginFlowTimerIfNeeded()
     }
@@ -587,6 +785,35 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         lastSupportRepairResult = result
         supportSummary = result.summary
         isLoading = false
+    }
+
+    func resolveInitialLandingSectionIfNeeded() {
+        guard !didResolveInitialLandingSection, let machineSummary else { return }
+        didResolveInitialLandingSection = true
+        if !machineSummary.openClaw.available {
+            selectedSection = .monitor
+        }
+    }
+
+    func recordMachineHistory(_ machineSummary: MachineSummary) {
+        let sample = MachineTrendSample(
+            collectedAt: machineSummary.collectedAt,
+            cpuActivePercent: Double(machineSummary.cpu.activePercent),
+            memoryPressurePercent: Double(machineSummary.memory.pressurePercent),
+            swapUsedPercent: Double(machineSummary.swap.usedPercent),
+            receivedBytesPerSec: Double(machineSummary.network.receivedBytesPerSec ?? 0),
+            sentBytesPerSec: Double(machineSummary.network.sentBytesPerSec ?? 0)
+        )
+
+        if machineHistory.last?.collectedAt == sample.collectedAt {
+            machineHistory[machineHistory.count - 1] = sample
+            return
+        }
+
+        machineHistory.append(sample)
+        if machineHistory.count > maxMachineHistoryPoints {
+            machineHistory.removeFirst(machineHistory.count - maxMachineHistoryPoints)
+        }
     }
 
     func clearLoginFlow() {
@@ -637,12 +864,16 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         actions.openURL(url)
     }
 
+    func openActivityMonitor() {
+        actions.openActivityMonitor()
+    }
+
     func createProfile(named name: String) {
         actions.createProfile(name)
     }
 
-    func refreshAll(silent: Bool = false, scope: NativeRefreshScope = .full) {
-        actions.refreshAll(NativeRefreshRequest(silent: silent, scope: scope))
+    func refreshAll(silent: Bool = false, scope: NativeRefreshScope = .full, busyKey: String? = nil) {
+        actions.refreshAll(NativeRefreshRequest(silent: silent, scope: scope, busyKey: busyKey))
     }
 
     func login(profileName: String) {

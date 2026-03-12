@@ -79,6 +79,8 @@ private func riskPresentation(_ risk: String) -> StatusPresentation {
     switch risk {
     case "none":
         return StatusPresentation(label: "正常", tint: .green)
+    case "notice":
+        return StatusPresentation(label: "提示", tint: NativePalette.accent)
     case "watch":
         return StatusPresentation(label: "观察", tint: .orange)
     case "high":
@@ -86,6 +88,35 @@ private func riskPresentation(_ risk: String) -> StatusPresentation {
     default:
         return StatusPresentation(label: "未知", tint: .secondary)
     }
+}
+
+private func machinePressurePresentation(_ pressure: String) -> StatusPresentation {
+    switch pressure {
+    case "high":
+        return StatusPresentation(label: "偏高", tint: NativePalette.rose)
+    case "watch":
+        return StatusPresentation(label: "观察", tint: NativePalette.amber)
+    case "normal":
+        return StatusPresentation(label: "正常", tint: NativePalette.mint)
+    default:
+        return StatusPresentation(label: "等待采样", tint: .secondary)
+    }
+}
+
+private func openClawAvailabilityPresentation(_ openClaw: MachineSummary.OpenClaw?) -> StatusPresentation {
+    guard let openClaw else {
+        return StatusPresentation(label: "等待检测", tint: NativePalette.amber)
+    }
+    if openClaw.available {
+        return StatusPresentation(label: "已发现", tint: NativePalette.mint)
+    }
+    return StatusPresentation(label: "未发现", tint: NativePalette.amber)
+}
+
+private func processRunningPresentation(_ snapshot: MachineSummary.ProcessGroup.Snapshot) -> StatusPresentation {
+    snapshot.running
+        ? StatusPresentation(label: "运行中", tint: NativePalette.mint)
+        : StatusPresentation(label: "未运行", tint: NativePalette.amber)
 }
 
 private func configValidationPresentation(_ valid: Bool) -> StatusPresentation {
@@ -172,6 +203,38 @@ private func formatMillis(_ value: Int?) -> String {
         return String(format: "%.2fs", Double(value) / 1000)
     }
     return "\(value)ms"
+}
+
+private func formatBytes(_ value: Int?) -> String {
+    guard let value else { return "未提供" }
+    return ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .binary)
+}
+
+private func formatByteRate(_ value: Int?) -> String {
+    guard let value else { return "等待采样" }
+    return "\(ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .binary))/s"
+}
+
+private func formatCPUPercent(_ value: Double?) -> String {
+    guard let value else { return "未提供" }
+    return String(format: "%.1f%%", value)
+}
+
+private func formatUptimeSeconds(_ value: Int?) -> String {
+    guard let value else { return "未提供" }
+    if value <= 0 { return "刚启动" }
+
+    let days = value / 86_400
+    let hours = (value % 86_400) / 3_600
+    let minutes = (value % 3_600) / 60
+
+    if days > 0 {
+        return "\(days)天 \(hours)小时"
+    }
+    if hours > 0 {
+        return "\(hours)小时 \(minutes)分钟"
+    }
+    return "\(minutes)分钟"
 }
 
 private func formatProbeWindow(minMs: Int?, maxMs: Int?) -> String {
@@ -281,6 +344,12 @@ private func sectionNarrative(for section: NativeSection) -> SectionNarrative {
             title: "总览",
             detail: nil
         )
+    case .monitor:
+        return SectionNarrative(
+            eyebrow: nil,
+            title: "监控",
+            detail: nil
+        )
     case .profiles:
         return SectionNarrative(
             eyebrow: nil,
@@ -332,6 +401,9 @@ private func diagnosticsPresentation(summary: SupportSummary?) -> StatusPresenta
     }
     if summary.discord.status == "unstable" || summary.environment.riskLevel == "watch" {
         return StatusPresentation(label: "观察中", tint: NativePalette.amber)
+    }
+    if summary.environment.riskLevel == "notice" {
+        return StatusPresentation(label: "有提示", tint: NativePalette.accent)
     }
     return StatusPresentation(label: "稳定", tint: NativePalette.mint)
 }
@@ -491,8 +563,14 @@ private func maintenanceHeadline(summary: SupportSummary?) -> String {
     if summary.discord.status == "offline" {
         return "Discord 当前离线。"
     }
-    if summary.environment.riskLevel == "high" || summary.environment.riskLevel == "watch" {
-        return "当前网络环境会影响稳定性。"
+    if summary.environment.riskLevel == "high" {
+        return "当前网络环境异常，会直接影响稳定性。"
+    }
+    if summary.environment.riskLevel == "watch" {
+        return "检测到多条环境信号，可能放大断连概率。"
+    }
+    if summary.environment.riskLevel == "notice" {
+        return "检测到环境提示，不一定需要立刻处理。"
     }
     if !summary.gateway.reachable {
         return gatewayDiagnosis(summary: summary).headline
@@ -519,7 +597,10 @@ private func primaryRecommendation(summary: SupportSummary?) -> String {
         return functionalText(summary.discord.recommendation, fallback: "先执行“一键修复”。")
     }
     if summary.environment.riskLevel == "high" || summary.environment.riskLevel == "watch" {
-        return functionalText(summary.environment.recommendation, fallback: "先执行“官方体检”。")
+        return functionalText(summary.environment.recommendation, fallback: "先检查代理、VPN 和睡眠恢复因素。")
+    }
+    if summary.environment.riskLevel == "notice" {
+        return "当前先观察；如果继续断连，再排查环境因素。"
     }
     if !summary.gateway.reachable {
         return gatewayDiagnosis(summary: summary).detail
@@ -735,7 +816,7 @@ private func diagnosticPlan(summary: SupportSummary?) -> DiagnosticPlan {
 
     if summary.environment.riskLevel == "high" || summary.environment.riskLevel == "watch" {
         return DiagnosticPlan(
-            headline: summary.environment.riskLevel == "high" ? "环境风险正在放大断连概率" : "环境存在波动迹象",
+            headline: summary.environment.riskLevel == "high" ? "环境因素正在放大断连概率" : "检测到多条环境波动信号",
             impact: "",
             detail: functionalText(summary.environment.recommendation, fallback: "先检查网络环境。"),
             accent: riskPresentation(summary.environment.riskLevel).tint,
@@ -790,6 +871,7 @@ struct NativeRootView: View {
 
     private let sections: [SectionDescriptor] = [
         SectionDescriptor(section: .overview, title: "总览", caption: "", symbol: "rectangle.grid.2x2"),
+        SectionDescriptor(section: .monitor, title: "监控", caption: "", symbol: "waveform.path.ecg.rectangle"),
         SectionDescriptor(section: .profiles, title: "账号池", caption: "", symbol: "person.3"),
         SectionDescriptor(section: .settings, title: "设置", caption: "", symbol: "slider.horizontal.3"),
         SectionDescriptor(section: .diagnostics, title: "诊断", caption: "", symbol: "stethoscope"),
@@ -881,6 +963,8 @@ struct NativeRootView: View {
         let hasDiagnosticWarning = item.section == .diagnostics
             && store.supportSummary?.discord.status != nil
             && store.supportSummary?.discord.status != "healthy"
+        let hasMonitorWarning = item.section == .monitor
+            && (store.machineSummary?.memory.pressure == "high" || (store.machineSummary?.swap.usedPercent ?? 0) >= 5)
 
         Button {
             store.selectedSection = item.section
@@ -907,6 +991,10 @@ struct NativeRootView: View {
                 if hasDiagnosticWarning {
                     Circle()
                         .fill(supportStatusPresentation(store.supportSummary?.discord.status ?? "").tint)
+                        .frame(width: 8, height: 8)
+                } else if hasMonitorWarning {
+                    Circle()
+                        .fill(machinePressurePresentation(store.machineSummary?.memory.pressure ?? "").tint)
                         .frame(width: 8, height: 8)
                 }
             }
@@ -1006,6 +1094,8 @@ struct NativeRootView: View {
                         switch store.selectedSection {
                         case .overview:
                             OverviewSection(store: store)
+                        case .monitor:
+                            MonitorSection(store: store)
                         case .profiles:
                             ProfilesSection(store: store)
                         case .settings:
@@ -1039,6 +1129,10 @@ private struct NativeHeaderView: View {
                 }
 
                 heroStats(runtime: runtime, support: store.supportSummary)
+
+                if let machineSummary = store.machineSummary {
+                    headerMonitorStrip(summary: machineSummary)
+                }
             }
             .padding(24)
             .background(
@@ -1089,7 +1183,16 @@ private struct NativeHeaderView: View {
 
             AdaptiveLine(spacing: 10) {
                 ActionButton("刷新", systemImage: "arrow.clockwise", busy: false) {
-                    store.refreshAll()
+                    let scope: NativeRefreshScope
+                    switch store.selectedSection {
+                    case .diagnostics:
+                        scope = .full
+                    case .monitor:
+                        scope = .monitorOnly
+                    default:
+                        scope = .managerOnly
+                    }
+                    store.refreshAll(scope: scope)
                 }
             }
         }
@@ -1169,6 +1272,170 @@ private struct NativeHeaderView: View {
                 )
             }
         }
+    }
+
+    private func headerMonitorStrip(summary: MachineSummary) -> some View {
+        let pressure = machinePressurePresentation(summary.memory.pressure)
+        let manager = processRunningPresentation(summary.processes.manager)
+        let trafficHistory = store.machineHistory.map { $0.receivedBytesPerSec + $0.sentBytesPerSec }
+        let totalRate = (summary.network.receivedBytesPerSec ?? 0) + (summary.network.sentBytesPerSec ?? 0)
+
+        return VStack(alignment: .leading, spacing: 14) {
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 18) {
+                    headerMonitorSummary(summary: summary, pressure: pressure, manager: manager)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack(spacing: 10) {
+                        HeaderMonitorTrendChip(
+                            title: "CPU",
+                            value: "\(summary.cpu.activePercent)%",
+                            detail: "User \(summary.cpu.userPercent)% · Sys \(summary.cpu.systemPercent)%",
+                            values: store.machineHistory.map(\.cpuActivePercent),
+                            accent: NativePalette.accent
+                        )
+                        HeaderMonitorTrendChip(
+                            title: "内存",
+                            value: "\(summary.memory.pressurePercent)%",
+                            detail: pressure.label,
+                            values: store.machineHistory.map(\.memoryPressurePercent),
+                            accent: pressure.tint
+                        )
+                        HeaderMonitorTrendChip(
+                            title: "网络",
+                            value: formatByteRate(totalRate),
+                            detail: "↓ \(formatByteRate(summary.network.receivedBytesPerSec)) · ↑ \(formatByteRate(summary.network.sentBytesPerSec))",
+                            values: trafficHistory,
+                            accent: NativePalette.mint
+                        )
+                    }
+                    .frame(width: 560)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    headerMonitorSummary(summary: summary, pressure: pressure, manager: manager)
+                    AdaptiveLine(spacing: 10) {
+                        HeaderMonitorTrendChip(
+                            title: "CPU",
+                            value: "\(summary.cpu.activePercent)%",
+                            detail: "User \(summary.cpu.userPercent)% · Sys \(summary.cpu.systemPercent)%",
+                            values: store.machineHistory.map(\.cpuActivePercent),
+                            accent: NativePalette.accent
+                        )
+                        HeaderMonitorTrendChip(
+                            title: "内存",
+                            value: "\(summary.memory.pressurePercent)%",
+                            detail: pressure.label,
+                            values: store.machineHistory.map(\.memoryPressurePercent),
+                            accent: pressure.tint
+                        )
+                        HeaderMonitorTrendChip(
+                            title: "网络",
+                            value: formatByteRate(totalRate),
+                            detail: "↓ \(formatByteRate(summary.network.receivedBytesPerSec)) · ↑ \(formatByteRate(summary.network.sentBytesPerSec))",
+                            values: trafficHistory,
+                            accent: NativePalette.mint
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func headerMonitorSummary(
+        summary: MachineSummary,
+        pressure: StatusPresentation,
+        manager: StatusPresentation
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(pressure.tint)
+                    .frame(width: 8, height: 8)
+                Text("监控速览")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.76))
+            }
+
+            Text("CPU \(summary.cpu.activePercent)% · 压力 \(summary.memory.pressurePercent)% · Swap \(summary.swap.usedPercent)%")
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(headerMonitorDetail(summary: summary, pressure: pressure, manager: manager))
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.70))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    private func headerMonitorDetail(
+        summary: MachineSummary,
+        pressure: StatusPresentation,
+        manager: StatusPresentation
+    ) -> String {
+        let openClaw = summary.openClaw.available ? "OpenClaw 已发现" : "机器监控模式"
+        let managerLine = "Manager \(manager.label)"
+        let interfaceLine = summary.network.primaryInterface ?? "未识别接口"
+        let trafficLine = "↓ \(formatByteRate(summary.network.receivedBytesPerSec)) · ↑ \(formatByteRate(summary.network.sentBytesPerSec))"
+        return "\(openClaw) · 内存 \(pressure.label) · \(managerLine) · \(interfaceLine) · \(trafficLine)"
+    }
+}
+
+private struct HeaderMonitorTrendChip: View {
+    var title: String
+    var value: String
+    var detail: String
+    var values: [Double]
+    var accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 7, height: 7)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.74))
+                Spacer(minLength: 0)
+                Text(value)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
+
+            TrendSparkline(values: values, accent: accent)
+                .frame(height: 34)
+
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(Color.white.opacity(0.66))
+                .lineLimit(2)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
     }
 }
 
@@ -1290,7 +1557,7 @@ private struct OverviewSection: View {
 
     private var overviewAccent: Color {
         if let supportSummary = store.supportSummary {
-            if !supportSummary.maintenance.config.valid || !supportSummary.gateway.reachable || supportSummary.discord.status == "offline" {
+            if !supportSummary.maintenance.config.valid || !supportSummary.gateway.reachable || supportSummary.discord.status == "offline" || supportSummary.environment.riskLevel == "high" {
                 return NativePalette.rose
             }
             if supportSummary.environment.riskLevel == "watch" {
@@ -1325,13 +1592,409 @@ private struct OverviewSection: View {
         if let supportSummary = store.supportSummary {
             items += [
                 ("Discord", supportStatusPresentation(supportSummary.discord.status).label),
-                ("环境风险", riskPresentation(supportSummary.environment.riskLevel).label),
+                ("环境因素", riskPresentation(supportSummary.environment.riskLevel).label),
                 ("Watchdog", supportSummary.watchdog.statusLine),
                 ("最近断线", formatDate(supportSummary.discord.lastDisconnectAt))
             ]
         }
 
         return items
+    }
+}
+
+private struct MonitorSection: View {
+    @ObservedObject var store: NativeAppStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SectionLead(
+                title: "监控",
+                detail: ""
+            )
+
+            if let summary = store.machineSummary {
+                let openClaw = openClawAvailabilityPresentation(summary.openClaw)
+                let pressure = machinePressurePresentation(summary.memory.pressure)
+                let manager = processRunningPresentation(summary.processes.manager)
+
+                GridCard(title: "当前判断", systemImage: "waveform.path.ecg", accent: monitorAccent(summary)) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(monitorHeadline(summary))
+                                .font(.system(size: 28, weight: .bold, design: .rounded))
+                                .foregroundStyle(NativePalette.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Text(monitorDetail(summary))
+                                .font(.system(size: 15, weight: .regular))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        AdaptiveLine(spacing: 18) {
+                            InlineStatusColumn(
+                                title: "OpenClaw",
+                                value: openClaw.label,
+                                detail: summary.openClaw.path ?? "当前没有发现 CLI",
+                                accent: openClaw.tint
+                            )
+                            InlineStatusColumn(
+                                title: "内存状态",
+                                value: pressure.label,
+                                detail: "当前压力 \(summary.memory.pressurePercent)% · 已用 Swap \(summary.swap.usedPercent)%",
+                                accent: pressure.tint
+                            )
+                            InlineStatusColumn(
+                                title: "Manager",
+                                value: manager.label,
+                                detail: processSummary(summary.processes.manager),
+                                accent: manager.tint
+                            )
+                        }
+
+                        CalloutBlock(
+                            label: "下一步",
+                            value: monitorNextStep(summary),
+                            detail: nil
+                        )
+
+                        AdaptiveLine(spacing: 10) {
+                            ActionButton("刷新监控", systemImage: "arrow.clockwise", busy: store.isBusy("monitor:refresh")) {
+                                store.refreshAll(silent: false, scope: .monitorOnly, busyKey: "monitor:refresh")
+                            }
+                        }
+                    }
+                }
+
+                GridCard(
+                    title: "动态趋势",
+                    subtitle: "最近 \(max(store.machineHistory.count, 1)) 个采样点",
+                    systemImage: "chart.line.uptrend.xyaxis",
+                    accent: NativePalette.accent
+                ) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        AdaptiveLine(spacing: 12) {
+                            TrendTile(
+                                title: "CPU",
+                                value: "\(summary.cpu.activePercent)%",
+                                caption: "User \(summary.cpu.userPercent)% · Sys \(summary.cpu.systemPercent)%",
+                                values: store.machineHistory.map(\.cpuActivePercent),
+                                accent: NativePalette.accent
+                            )
+                            TrendTile(
+                                title: "内存压力",
+                                value: "\(summary.memory.pressurePercent)%",
+                                caption: "Wired + Active",
+                                values: store.machineHistory.map(\.memoryPressurePercent),
+                                accent: pressure.tint
+                            )
+                            TrendTile(
+                                title: "Swap",
+                                value: summary.swap.totalBytes > 0 ? "\(summary.swap.usedPercent)%" : "未启用",
+                                caption: summary.swap.totalBytes > 0 ? "已用 \(formatBytes(summary.swap.usedBytes))" : "当前没有分配 swap",
+                                values: store.machineHistory.map(\.swapUsedPercent),
+                                accent: summary.swap.usedPercent >= 5 ? NativePalette.amber : NativePalette.accent
+                            )
+                        }
+
+                        AdaptiveLine(spacing: 12) {
+                            TrendTile(
+                                title: "下载",
+                                value: formatByteRate(summary.network.receivedBytesPerSec),
+                                caption: summary.network.primaryInterface ?? "未识别接口",
+                                values: store.machineHistory.map(\.receivedBytesPerSec),
+                                accent: NativePalette.mint
+                            )
+                            TrendTile(
+                                title: "上传",
+                                value: formatByteRate(summary.network.sentBytesPerSec),
+                                caption: summary.network.primaryInterface ?? "未识别接口",
+                                values: store.machineHistory.map(\.sentBytesPerSec),
+                                accent: NativePalette.accent
+                            )
+                        }
+                    }
+                }
+
+                GridCard(title: "实时指标", systemImage: "gauge.with.dots.needle.67percent", accent: NativePalette.mint) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        AdaptiveLine(spacing: 12) {
+                            MetricTile(
+                                title: "CPU",
+                                value: "\(summary.cpu.activePercent)%",
+                                caption: "User \(summary.cpu.userPercent)% · Sys \(summary.cpu.systemPercent)% · Idle \(summary.cpu.idlePercent)%",
+                                accent: NativePalette.accent
+                            )
+                            MetricTile(
+                                title: "内存压力",
+                                value: "\(summary.memory.pressurePercent)%",
+                                caption: "Wired \(formatBytes(summary.memory.wiredBytes)) + Active \(formatBytes(summary.memory.activeBytes))",
+                                accent: pressure.tint
+                            )
+                            MetricTile(
+                                title: "Swap",
+                                value: summary.swap.totalBytes > 0 ? "\(summary.swap.usedPercent)%" : "未启用",
+                                caption: summary.swap.totalBytes > 0
+                                    ? "已用 \(formatBytes(summary.swap.usedBytes)) / \(formatBytes(summary.swap.totalBytes))"
+                                    : "当前没有分配 swap",
+                                accent: summary.swap.usedPercent >= 5 ? NativePalette.amber : NativePalette.accent
+                            )
+                        }
+
+                        MemoryStructurePanel(
+                            summary: summary.memory,
+                            accent: pressure.tint
+                        )
+
+                        AdaptiveLine(spacing: 12) {
+                            MetricTile(
+                                title: "磁盘剩余",
+                                value: formatBytes(summary.disk.freeBytes),
+                                caption: "\(URL(fileURLWithPath: summary.disk.path).lastPathComponent) · 已用 \(summary.disk.usedPercent)%",
+                                accent: summary.disk.usedPercent >= 90 ? NativePalette.rose : NativePalette.mint
+                            )
+                            MetricTile(
+                                title: "下载",
+                                value: formatByteRate(summary.network.receivedBytesPerSec),
+                                caption: "\(summary.network.primaryInterface ?? "未识别接口") · 总收 \(formatBytes(summary.network.totalReceivedBytes))",
+                                accent: NativePalette.mint
+                            )
+                            MetricTile(
+                                title: "上传",
+                                value: formatByteRate(summary.network.sentBytesPerSec),
+                                caption: "\(summary.network.primaryInterface ?? "未识别接口") · 总发 \(formatBytes(summary.network.totalSentBytes))",
+                                accent: NativePalette.accent
+                            )
+                        }
+                    }
+                }
+
+                GridCard(title: "进程与入口", systemImage: "server.rack", accent: NativePalette.amber) {
+                    TwoColumnFacts(items: [
+                        ("OpenClaw CLI", summary.openClaw.path ?? "未发现"),
+                        ("发现来源", openClawSource(summary.openClaw.source)),
+                        ("Manager", processSummary(summary.processes.manager)),
+                        ("Watchdog", processSummary(summary.processes.watchdog)),
+                        ("采样时间", formatDate(summary.collectedAt)),
+                        ("网络接口", summary.network.primaryInterface ?? "未识别"),
+                        ("Manager CPU", formatCPUPercent(summary.processes.manager.cpuPercent)),
+                        ("Manager RSS", formatBytes(summary.processes.manager.rssBytes))
+                    ])
+                }
+
+                GridCard(
+                    title: "占用前10",
+                    subtitle: "按 CPU 排序，点一行打开活动监视器，再按 PID 继续查",
+                    systemImage: "list.number",
+                    accent: NativePalette.amber
+                ) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        AdaptiveLine(spacing: 10) {
+                            ActionButton("打开活动监视器", systemImage: "arrow.up.forward.app", busy: false) {
+                                store.openActivityMonitor()
+                            }
+                        }
+
+                        if summary.topProcesses.isEmpty {
+                            Text("当前没有可显示的进程采样。")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(Array(summary.topProcesses.enumerated()), id: \.element.id) { index, process in
+                                ProcessLeaderboardRow(rank: index + 1, process: process) {
+                                    store.openActivityMonitor()
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                GridCard(title: "监控", systemImage: "waveform.path.ecg") {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                        Text("正在读取机器状态。")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private func monitorHeadline(_ summary: MachineSummary) -> String {
+        if !summary.openClaw.available {
+            return "当前没发现 OpenClaw，已退到机器监控模式。"
+        }
+        if summary.memory.pressure == "high" {
+            return "当前内存压力偏高，先稳住系统再让 OpenClaw 常驻。"
+        }
+        if summary.swap.usedPercent >= 80 {
+            return "当前内存压力不高，但 swap 占用还留得比较多。"
+        }
+        if !summary.processes.manager.running {
+            return "OpenClaw 已发现，但 manager 没在运行。"
+        }
+        return "机器状态稳定，可以继续后台运行。"
+    }
+
+    private func monitorDetail(_ summary: MachineSummary) -> String {
+        if !summary.openClaw.available {
+            return "这里会持续显示 CPU、内存、swap、磁盘、网络和守护进程状态。"
+        }
+        if !summary.processes.manager.running {
+            return "CLI 已发现，但当前 app 内 daemon 没跑起来。通常重开 app 就能恢复。"
+        }
+        if summary.memory.pressure == "high" {
+            return "内存压力 \(summary.memory.pressurePercent)% · Swap \(summary.swap.usedPercent)% · 磁盘剩余 \(formatBytes(summary.disk.freeBytes))"
+        }
+        if summary.swap.usedPercent >= 80 {
+            return "当前压力 \(summary.memory.pressurePercent)% · 已用 Swap \(summary.swap.usedPercent)% 。这更像历史挤压残留，不一定代表现在正在卡。"
+        }
+        return "CPU \(summary.cpu.activePercent)% · 压力 \(summary.memory.pressurePercent)% · 下载 \(formatByteRate(summary.network.receivedBytesPerSec))"
+    }
+
+    private func monitorNextStep(_ summary: MachineSummary) -> String {
+        if !summary.openClaw.available {
+            return "当前先把这里当作机器监控面板。需要接入时，再安装或补齐 OpenClaw CLI。"
+        }
+        if !summary.processes.manager.running {
+            return "先重开 app，让本地 manager daemon 拉起来，再回来看状态。"
+        }
+        if summary.memory.pressure == "high" {
+            return "这台机器当前真的在吃内存，先关掉高占用进程，再让 OpenClaw 常驻。"
+        }
+        if summary.swap.usedPercent >= 80 {
+            return "如果机器没有明显卡顿，可以先继续观察；只有 swap 继续上涨或同时出现卡顿时，再处理高占用进程。"
+        }
+        if summary.swap.usedPercent >= 25 {
+            return "这台机器近期吃过一段 swap，但当前压力不算高，先观察一会儿再决定要不要清进程。"
+        }
+        return "当前机器负载可接受，可以继续保持后台运行。"
+    }
+
+    private func monitorAccent(_ summary: MachineSummary) -> Color {
+        if summary.memory.pressure == "high" {
+            return NativePalette.rose
+        }
+        if !summary.openClaw.available || !summary.processes.manager.running || summary.memory.pressure == "watch" {
+            return NativePalette.amber
+        }
+        return NativePalette.mint
+    }
+
+    private func processSummary(_ snapshot: MachineSummary.ProcessGroup.Snapshot) -> String {
+        guard snapshot.running else {
+            return "未运行"
+        }
+        return [
+            snapshot.pid.map { "PID \($0)" },
+            snapshot.cpuPercent.map { "CPU \(formatCPUPercent($0))" },
+            snapshot.rssBytes.map { "RSS \(formatBytes($0))" },
+            snapshot.uptimeSeconds.map { "已运行 \(formatUptimeSeconds($0))" }
+        ]
+        .compactMap { $0 }
+        .joined(separator: " · ")
+    }
+
+    private func openClawSource(_ value: String) -> String {
+        switch value {
+        case "env":
+            return "环境变量"
+        case "local":
+            return "~/.local/bin"
+        case "path":
+            return "PATH"
+        default:
+            return "未发现"
+        }
+    }
+}
+
+private struct ProcessLeaderboardRow: View {
+    var rank: Int
+    var process: MachineSummary.TopProcess
+    var action: () -> Void
+
+    private var accent: Color {
+        if process.cpuPercent >= 50 {
+            return NativePalette.rose
+        }
+        if process.cpuPercent >= 20 {
+            return NativePalette.amber
+        }
+        return NativePalette.mint
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(accent.opacity(0.14))
+                        .frame(width: 34, height: 34)
+                    Text("\(rank)")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(accent)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(process.name)
+                            .font(.headline)
+                            .foregroundStyle(NativePalette.ink)
+                            .lineLimit(1)
+                        Text("PID \(process.pid)")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(formatCPUPercent(process.cpuPercent))
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(accent)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(accent.opacity(0.14))
+                            )
+                    }
+
+                    AdaptiveLine(spacing: 10) {
+                        ProcessMetricPill(
+                            label: "内存",
+                            value: formatBytes(process.rssBytes),
+                            accent: NativePalette.accent
+                        )
+                        ProcessMetricPill(
+                            label: "运行时长",
+                            value: formatUptimeSeconds(process.uptimeSeconds),
+                            accent: NativePalette.mint
+                        )
+                    }
+
+                    Text(process.command)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(NativePalette.surfaceAlt)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(NativePalette.border, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1909,7 +2572,7 @@ private struct DiagnosticsSection: View {
                                 accent: supportStatusPresentation(summary.discord.status).tint
                             )
                             InlineStatusColumn(
-                                title: "环境风险",
+                                title: "环境因素",
                                 value: riskPresentation(summary.environment.riskLevel).label,
                                 detail: present(summary.environment.recommendation),
                                 accent: riskPresentation(summary.environment.riskLevel).tint
@@ -2099,10 +2762,10 @@ private struct DiagnosticsSection: View {
                                 Divider()
                                     .overlay(NativePalette.border)
 
-                                DetailSectionBlock(title: "环境风险") {
+                                DetailSectionBlock(title: "环境因素") {
                                     VStack(alignment: .leading, spacing: 14) {
                                         TwoColumnFacts(items: [
-                                            ("风险等级", riskPresentation(summary.environment.riskLevel).label),
+                                            ("提示级别", riskPresentation(summary.environment.riskLevel).label),
                                             ("主要网卡", present(summary.environment.primaryInterface)),
                                             ("Gateway 地址", present(summary.environment.gatewayAddress)),
                                             ("VPN 迹象", summary.environment.vpnLikelyActive ? "可能启用" : "未发现"),
@@ -2115,7 +2778,7 @@ private struct DiagnosticsSection: View {
 
                                         if !summary.environment.riskySignals.isEmpty {
                                             VStack(alignment: .leading, spacing: 8) {
-                                                Text("风险信号")
+                                                Text("环境信号")
                                                     .font(.headline)
                                                 ForEach(summary.environment.riskySignals, id: \.self) { signal in
                                                     Text("• \(signal)")
@@ -2722,6 +3385,265 @@ private struct FactTile: View {
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(NativePalette.borderStrong)
                 .frame(width: 2)
+        }
+    }
+}
+
+private struct UsageSegment: Identifiable {
+    var label: String
+    var value: Int
+    var tint: Color
+
+    var id: String { label }
+}
+
+private struct MemoryStructurePanel: View {
+    var summary: MachineSummary.Memory
+    var accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(accent.opacity(0.14))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: "memorychip")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(accent)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("内存结构")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("压力 \(summary.pressurePercent)% · 总占用 \(summary.usedPercent)%")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(NativePalette.ink)
+                }
+            }
+
+            SegmentedUsageBar(segments: [
+                UsageSegment(label: "Wired", value: summary.wiredBytes, tint: NativePalette.rose),
+                UsageSegment(label: "Used", value: summary.activeBytes, tint: NativePalette.amber),
+                UsageSegment(label: "Cache", value: summary.cachedBytes, tint: NativePalette.accent),
+                UsageSegment(label: "Free", value: summary.freeBytes, tint: NativePalette.mint),
+                UsageSegment(label: "Other", value: summary.otherBytes, tint: NativePalette.surfaceAlt)
+            ])
+
+            AdaptiveLine(spacing: 10) {
+                UsageLegend(label: "Wired", value: formatBytes(summary.wiredBytes), tint: NativePalette.rose)
+                UsageLegend(label: "Used", value: formatBytes(summary.activeBytes), tint: NativePalette.amber)
+                UsageLegend(label: "Cache", value: formatBytes(summary.cachedBytes), tint: NativePalette.accent)
+            }
+            AdaptiveLine(spacing: 10) {
+                UsageLegend(label: "Free", value: formatBytes(summary.freeBytes), tint: NativePalette.mint)
+                UsageLegend(label: "Other", value: formatBytes(summary.otherBytes), tint: NativePalette.surfaceAlt)
+                UsageLegend(label: "Compressed", value: formatBytes(summary.compressedBytes), tint: accent)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NativePalette.surfaceRaised)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NativePalette.border, lineWidth: 1)
+        )
+    }
+}
+
+private struct SegmentedUsageBar: View {
+    var segments: [UsageSegment]
+
+    var body: some View {
+        GeometryReader { geometry in
+            let total = max(segments.reduce(0) { $0 + max($1.value, 0) }, 1)
+
+            HStack(spacing: 1) {
+                ForEach(segments) { segment in
+                    Rectangle()
+                        .fill(segment.tint)
+                        .frame(width: max((CGFloat(segment.value) / CGFloat(total)) * geometry.size.width, segment.value > 0 ? 2 : 0))
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(NativePalette.surfaceAlt)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .frame(height: 16)
+    }
+}
+
+private struct UsageLegend: View {
+    var label: String
+    var value: String
+    var tint: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(tint)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.caption)
+                    .foregroundStyle(NativePalette.ink)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ProcessMetricPill: View {
+    var label: String
+    var value: String
+    var accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(NativePalette.ink)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(accent.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(NativePalette.border, lineWidth: 1)
+        )
+    }
+}
+
+private struct TrendTile: View {
+    var title: String
+    var value: String
+    var caption: String
+    var values: [Double]
+    var accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 8, height: 8)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(value)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .foregroundStyle(NativePalette.ink)
+
+            TrendSparkline(values: values, accent: accent)
+                .frame(height: 72)
+
+            Text(caption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(NativePalette.surfaceRaised)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(NativePalette.border, lineWidth: 1)
+        )
+    }
+}
+
+private struct TrendSparkline: View {
+    var values: [Double]
+    var accent: Color
+
+    var body: some View {
+        GeometryReader { geometry in
+            let points = chartPoints(in: geometry.size)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(NativePalette.surfaceAlt.opacity(0.72))
+
+                if points.count >= 2 {
+                    Path { path in
+                        guard let first = points.first else { return }
+                        path.move(to: CGPoint(x: first.x, y: geometry.size.height))
+                        for point in points {
+                            path.addLine(to: point)
+                        }
+                        if let last = points.last {
+                            path.addLine(to: CGPoint(x: last.x, y: geometry.size.height))
+                        }
+                        path.closeSubpath()
+                    }
+                    .fill(
+                        LinearGradient(
+                            colors: [accent.opacity(0.24), accent.opacity(0.03)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+
+                    Path { path in
+                        guard let first = points.first else { return }
+                        path.move(to: first)
+                        for point in points.dropFirst() {
+                            path.addLine(to: point)
+                        }
+                    }
+                    .stroke(accent, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+
+                    if let last = points.last {
+                        Circle()
+                            .fill(accent)
+                            .frame(width: 7, height: 7)
+                            .position(last)
+                    }
+                } else if let point = points.first {
+                    Capsule(style: .continuous)
+                        .fill(accent.opacity(0.88))
+                        .frame(width: max(geometry.size.width - 20, 8), height: 2.5)
+                        .position(x: geometry.size.width / 2, y: point.y)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    private func chartPoints(in size: CGSize) -> [CGPoint] {
+        let samples = values.isEmpty ? [0] : values
+        let minValue = samples.min() ?? 0
+        let maxValue = samples.max() ?? 0
+        let range = max(maxValue - minValue, 1)
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+
+        return samples.enumerated().map { index, value in
+            let x = samples.count == 1
+                ? width / 2
+                : (CGFloat(index) / CGFloat(samples.count - 1)) * width
+            let normalized = (value - minValue) / range
+            let y = height - (CGFloat(normalized) * (height - 10)) - 5
+            return CGPoint(x: x, y: y)
         }
     }
 }

@@ -9,7 +9,7 @@ OpenClaw Manager Native 是面向 macOS 的 OpenClaw 本地管理桌面版。
 - 直接在桌面端执行诊断、修复和服务重启
 - 产出可分发的 `.app`、`.dmg`、`.pkg`、`.zip`
 
-当前版本：`1.0.6`
+当前版本：`1.0.7`
 
 ## English
 
@@ -154,6 +154,7 @@ bash ./scripts/uninstall-watchdog.sh
 
 详细发布记录放在 `docs/releases/`：
 
+- [1.0.7](./docs/releases/1.0.7.md) 机器监控、动态趋势、诊断降噪和启动性能修复
 - [1.0.6](./docs/releases/1.0.6.md) 原生 UI 去宣传文案、暗色收口、官网内容重写
 - [1.0.5](./docs/releases/1.0.5.md) 诊断快路径、启动链死锁修复、后台空闲 CPU 继续收口
 - [1.0.4](./docs/releases/1.0.4.md) 诊断中心稳定性和性能收口

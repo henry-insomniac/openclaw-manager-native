@@ -35,6 +35,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private var statusItem: NSStatusItem?
     private var latestManagerSummary: ManagerSummary?
     private var latestSupportSummary: SupportSummary?
+    private var latestMachineSummary: MachineSummary?
     private var lastMenuBarError: String?
     private var isRestarting = false
 
@@ -57,7 +58,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             rebuildMenu()
             try restartRuntime(reason: "startup")
             ensureWindow()
-            refreshManagerData()
+            refreshStartupData()
             store.start()
             NSApp.activate(ignoringOtherApps: true)
         } catch {
@@ -98,7 +99,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         store.configure(actions: NativeAppActions(
             refreshAll: { [weak self] request in
                 Task { @MainActor [weak self] in
-                    self?.refreshManagerData(scope: request.scope, showErrorAlerts: false, silentForStore: request.silent)
+                    self?.refreshManagerData(
+                        scope: request.scope,
+                        showErrorAlerts: false,
+                        silentForStore: request.silent,
+                        busyKey: request.busyKey
+                    )
                 }
             },
             pollLoginFlow: { [weak self] flowId in
@@ -189,6 +195,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             openURL: { url in
                 Task { @MainActor in
                     NSWorkspace.shared.open(url)
+                }
+            },
+            openActivityMonitor: { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.openActivityMonitor()
                 }
             },
             openGatewayLog: { [weak self] in
@@ -507,30 +518,72 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
-    private func applyRefreshedState(summary: ManagerSummary, supportSummary: SupportSummary?) {
+    private func applyRefreshedState(summary: ManagerSummary, supportSummary: SupportSummary?, machineSummary: MachineSummary?) {
         latestManagerSummary = summary
+        latestSupportSummary = supportSummary
+        if let machineSummary {
+            latestMachineSummary = machineSummary
+        }
+        lastMenuBarError = nil
+        pushLocalSnapshotToStore()
+        rebuildStatusItemMenu()
+        rebuildMenu()
+        store.applyRefresh(summary: summary, supportSummary: supportSummary, machineSummary: machineSummary)
+    }
+
+    @MainActor
+    private func applyMachineRefreshedState(_ machineSummary: MachineSummary) {
+        latestMachineSummary = machineSummary
+        lastMenuBarError = nil
+        store.applyMachineRefresh(machineSummary)
+    }
+
+    @MainActor
+    private func applySupportRefreshedState(_ supportSummary: SupportSummary) {
         latestSupportSummary = supportSummary
         lastMenuBarError = nil
         pushLocalSnapshotToStore()
         rebuildStatusItemMenu()
         rebuildMenu()
-        store.applyRefresh(summary: summary, supportSummary: supportSummary)
+        store.applySupportRefresh(supportSummary)
+    }
+
+    @MainActor
+    private func refreshStartupData(showErrorAlerts: Bool = false, silentForStore: Bool = true) {
+        refreshManagerData(scope: .managerOnly, showErrorAlerts: showErrorAlerts, silentForStore: silentForStore)
+        refreshManagerData(scope: .monitorOnly, silentForStore: true)
+        if store.selectedSection == .diagnostics {
+            refreshManagerData(scope: .supportOnly, showErrorAlerts: showErrorAlerts, silentForStore: silentForStore)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.store.selectedSection != .diagnostics else { return }
+            self.refreshManagerData(scope: .supportOnly, silentForStore: true)
+        }
     }
 
     @MainActor
     private func refreshManagerData(
         scope: NativeRefreshScope = .full,
         showErrorAlerts: Bool = false,
-        silentForStore: Bool = true
+        silentForStore: Bool = true,
+        busyKey: String? = nil
     ) {
+        if let busyKey {
+            store.setBusy(busyKey, active: true)
+        }
         guard currentApiPort != nil else {
             latestManagerSummary = nil
             latestSupportSummary = nil
+            latestMachineSummary = nil
             lastMenuBarError = "本地服务还没有启动完成"
             pushLocalSnapshotToStore()
             rebuildStatusItemMenu()
             rebuildMenu()
             store.applyRefreshError(lastMenuBarError ?? "本地服务还没有启动完成", silent: silentForStore)
+            if let busyKey {
+                store.setBusy(busyKey, active: false)
+            }
             return
         }
 
@@ -540,19 +593,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             do {
                 let summaryBox = RequestResultBox<ManagerSummary>()
                 let supportBox = RequestResultBox<SupportSummary>()
-                let includeSupport = scope == .full
+                let machineBox = RequestResultBox<MachineSummary>()
+                let includeManager = scope != .monitorOnly && scope != .supportOnly
+                let includeSupport = scope == .full || scope == .supportOnly
+                let includeMachine = scope == .full || scope == .monitorOnly
                 let supportPath = !silentForStore ? "/api/support/summary?fresh=1" : "/api/support/summary"
                 let group = DispatchGroup()
 
-                group.enter()
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    defer { group.leave() }
-                    guard let self else { return }
-                    do {
-                        let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/manager")
-                        summaryBox.value = .success(summary)
-                    } catch {
-                        summaryBox.value = .failure(error)
+                if includeManager {
+                    group.enter()
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        defer { group.leave() }
+                        guard let self else { return }
+                        do {
+                            let summary: ManagerSummary = try self.performManagerRequest(path: "/api/openclaw/manager")
+                            summaryBox.value = .success(summary)
+                        } catch {
+                            summaryBox.value = .failure(error)
+                        }
                     }
                 }
 
@@ -570,7 +628,53 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                     }
                 }
 
+                if includeMachine {
+                    group.enter()
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        defer { group.leave() }
+                        guard let self else { return }
+                        do {
+                            let machineSummary: MachineSummary = try self.performManagerRequest(path: "/api/machine/summary")
+                            machineBox.value = .success(machineSummary)
+                        } catch {
+                            machineBox.value = .failure(error)
+                        }
+                    }
+                }
+
                 group.wait()
+
+                if !includeManager {
+                    if includeMachine {
+                        guard let machineResult = machineBox.value else {
+                            throw NSError(domain: self.appName, code: 26, userInfo: [NSLocalizedDescriptionKey: "本地机器监控摘要为空"])
+                        }
+
+                        let machineSummary = try machineResult.get()
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.applyMachineRefreshedState(machineSummary)
+                            if let busyKey {
+                                self.store.setBusy(busyKey, active: false)
+                            }
+                        }
+                        return
+                    }
+
+                    guard let supportResult = supportBox.value else {
+                        throw NSError(domain: self.appName, code: 27, userInfo: [NSLocalizedDescriptionKey: "本地诊断摘要为空"])
+                    }
+
+                    let supportSummary = try supportResult.get()
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.applySupportRefreshedState(supportSummary)
+                        if let busyKey {
+                            self.store.setBusy(busyKey, active: false)
+                        }
+                    }
+                    return
+                }
 
                 guard let summaryResult = summaryBox.value else {
                     throw NSError(domain: self.appName, code: 25, userInfo: [NSLocalizedDescriptionKey: "本地 manager 摘要为空"])
@@ -578,19 +682,49 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
                 let summary = try summaryResult.get()
                 let supportSummary = includeSupport ? (try? supportBox.value?.get()) : self.latestSupportSummary
+                let machineSummary = includeMachine ? (try? machineBox.value?.get()) : self.latestMachineSummary
                 Task { @MainActor [weak self] in
-                    self?.applyRefreshedState(summary: summary, supportSummary: supportSummary)
+                    guard let self else { return }
+                    self.applyRefreshedState(summary: summary, supportSummary: supportSummary, machineSummary: machineSummary)
+                    if let busyKey {
+                        self.store.setBusy(busyKey, active: false)
+                    }
                 }
             } catch {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.lastMenuBarError = error.localizedDescription
+                    if scope == .monitorOnly {
+                        self.latestMachineSummary = nil
+                        self.store.applyRefreshError(error.localizedDescription, silent: silentForStore)
+                        if let busyKey {
+                            self.store.setBusy(busyKey, active: false)
+                        }
+                        if showErrorAlerts {
+                            self.showError(error)
+                        }
+                        return
+                    }
+                    if scope == .supportOnly {
+                        self.store.applyRefreshError(error.localizedDescription, silent: silentForStore)
+                        if let busyKey {
+                            self.store.setBusy(busyKey, active: false)
+                        }
+                        if showErrorAlerts {
+                            self.showError(error)
+                        }
+                        return
+                    }
                     self.latestManagerSummary = nil
                     self.latestSupportSummary = nil
+                    self.latestMachineSummary = nil
                     self.pushLocalSnapshotToStore()
                     self.rebuildStatusItemMenu()
                     self.rebuildMenu()
                     self.store.applyRefreshError(error.localizedDescription, silent: silentForStore)
+                    if let busyKey {
+                        self.store.setBusy(busyKey, active: false)
+                    }
                     if showErrorAlerts {
                         self.showError(error)
                     }
@@ -705,7 +839,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }, onSuccess: { _ in
             self.store.showNotice(.success, title: "已创建 \(trimmed)")
             self.store.selectProfile(trimmed)
-            self.refreshManagerData(silentForStore: true)
+            self.refreshManagerData(scope: .managerOnly, silentForStore: true)
         })
     }
 
@@ -737,7 +871,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/probe", method: "POST") as ManagedProfileSnapshot
         }, onSuccess: { _ in
             self.store.showNotice(.success, title: "\(profileName) 探测完成")
-            self.refreshManagerData(silentForStore: true)
+            self.refreshManagerData(scope: .managerOnly, silentForStore: true)
         })
     }
 
@@ -746,7 +880,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         performBackgroundUIRequest(key: "activate:\(profileName)", errorTitle: "切换账号失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/activate", method: "POST") as ManagerSummary
         }, onSuccess: { summary in
-            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: "已切换到 \(profileName)")
         })
     }
@@ -756,7 +890,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         performBackgroundUIRequest(key: "activate:recommended", errorTitle: "切换推荐账号失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/activate-recommended", method: "POST") as ManagerSummary
         }, onSuccess: { summary in
-            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: "已切换到推荐账号")
         })
     }
@@ -767,7 +901,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             let body = try JSONEncoder().encode(patch)
             return try self.performManagerRequest(path: "/api/openclaw/settings", method: "PATCH", body: body) as ManagerSummary
         }, onSuccess: { summary in
-            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: "自动化设置已保存")
         })
     }
@@ -777,7 +911,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         performBackgroundUIRequest(key: "automation:tick", errorTitle: "执行自动探测失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/automation/tick", method: "POST") as AutomationTickResult
         }, onSuccess: { result in
-            self.applyRefreshedState(summary: result.summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: result.summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             if result.switched {
                 self.store.showNotice(.success, title: "自动切换 \(result.fromProfileName ?? "none") -> \(result.toProfileName ?? "none")")
             } else {
@@ -799,7 +933,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                 self.latestSupportSummary = result.summary
                 self.store.applySupportRepairResult(result)
                 if let summary = self.latestManagerSummary {
-                    self.applyRefreshedState(summary: summary, supportSummary: result.summary)
+                    self.applyRefreshedState(summary: summary, supportSummary: result.summary, machineSummary: self.latestMachineSummary)
                 } else {
                     self.pushLocalSnapshotToStore()
                     self.rebuildStatusItemMenu()
@@ -826,7 +960,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         performBackgroundUIRequest(errorTitle: "切换推荐账号失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/activate-recommended", method: "POST") as ManagerSummary
         }, onSuccess: { summary in
-            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: "已切换到推荐账号")
         })
     }
@@ -840,7 +974,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         performBackgroundUIRequest(errorTitle: "切换账号失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/profiles/\(profileName)/activate", method: "POST") as ManagerSummary
         }, onSuccess: { summary in
-            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: "已切换到 \(profileName)")
         })
     }
@@ -853,7 +987,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             let body = try JSONSerialization.data(withJSONObject: ["autoActivateEnabled": nextEnabled])
             return try self.performManagerRequest(path: "/api/openclaw/settings", method: "PATCH", body: body) as ManagerSummary
         }, onSuccess: { summary in
-            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: nextEnabled ? "已开启自动切换" : "已关闭自动切换")
         })
     }
@@ -863,7 +997,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         performBackgroundUIRequest(errorTitle: "执行自动探测失败", request: {
             try self.performManagerRequest(path: "/api/openclaw/automation/tick", method: "POST") as AutomationTickResult
         }, onSuccess: { result in
-            self.applyRefreshedState(summary: result.summary, supportSummary: self.latestSupportSummary)
+            self.applyRefreshedState(summary: result.summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.info, title: result.switched ? "本轮已完成切换" : "本轮未切换", detail: result.reason)
         })
     }
@@ -1063,10 +1197,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
+    private func openActivityMonitor() {
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ActivityMonitor") {
+            NSWorkspace.shared.open(appURL)
+            return
+        }
+
+        let fallbackURL = URL(fileURLWithPath: "/System/Applications/Utilities/Activity Monitor.app")
+        if FileManager.default.fileExists(atPath: fallbackURL.path) {
+            NSWorkspace.shared.open(fallbackURL)
+            return
+        }
+
+        store.showNotice(.error, title: "找不到活动监视器", detail: "系统没有返回 Activity Monitor 的应用路径。")
+    }
+
+    @MainActor
     @objc private func restartServices(_ sender: Any?) {
         do {
             try restartRuntime(reason: "manual")
-            refreshManagerData(silentForStore: false)
+            refreshStartupData(showErrorAlerts: true, silentForStore: false)
             store.showNotice(.success, title: "服务已重启")
         } catch {
             showError(error)
@@ -1269,7 +1419,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             }
             try persistSettings(next)
             try restartRuntime(reason: reason)
-            refreshManagerData(silentForStore: false)
+            refreshStartupData(showErrorAlerts: true, silentForStore: false)
             store.showNotice(.success, title: "本地目录已更新")
         } catch {
             showError(error)
