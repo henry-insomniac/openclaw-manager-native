@@ -519,6 +519,7 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     func start() {
         guard !started else { return }
         started = true
+        selectedSection = .overview
         scheduleRefreshTimer()
     }
 
