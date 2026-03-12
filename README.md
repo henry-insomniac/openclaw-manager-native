@@ -79,6 +79,7 @@ OpenClaw CLI / 本地配置 / launchd / gateway / watchdog
 - `cmd/openclaw-manager-daemon/`: 本地管理 daemon
 - `cmd/openclaw-watchdog/`: 本机 watchdog
 - `scripts/`: 构建、打包、签名、公证和 watchdog 脚本
+- `docs/API.md`: 本地 API 路由与作用说明
 - `docs/releases/`: 每个版本的发布记录
 - `assets/`: 图标、entitlements 等打包资源
 - `vendor/runtime/`: 打包进 app 的 runtime 输出目录
@@ -137,6 +138,17 @@ bash ./scripts/install-watchdog.sh
 bash ./scripts/watchdog-status.sh
 bash ./scripts/uninstall-watchdog.sh
 ```
+
+## API
+
+本地 daemon API 文档见 [docs/API.md](./docs/API.md)。
+
+里面列了：
+
+- 所有当前公开的本地路由
+- 每个接口的作用
+- `support/repair` 可执行动作
+- 常见调用顺序和使用边界
 
 ## CHANGELOG
 
