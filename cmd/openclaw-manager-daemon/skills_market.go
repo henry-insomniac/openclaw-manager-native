@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const (
@@ -25,6 +26,10 @@ const (
 	skillsMarketDetailTTL          = 10 * time.Minute
 	skillsMarketDownloadTimeout    = 95 * time.Second
 	skillsMarketMaxRetryAfter      = 45 * time.Second
+	skillsMarketBrowsePageSize     = 100
+	skillsMarketBrowseMaxPages     = 3
+	skillsMarketSearchLimit        = 40
+	skillsMarketMaxCategoryCount   = 8
 	defaultAwesomeSkillsRepoURL    = "https://github.com/VoltAgent/awesome-openclaw-skills"
 	defaultAwesomeSkillsRawBaseURL = "https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main"
 	defaultClawHubAPIBaseURL       = "https://clawhub.ai/api/v1"
@@ -41,6 +46,8 @@ var (
 type cachedOpenClawSkillsMarketSummary struct {
 	Summary   OpenClawSkillsMarketSummary
 	FetchedAt time.Time
+	Query     string
+	Sort      string
 }
 
 type cachedOpenClawSkillMarketDetail struct {
@@ -52,6 +59,9 @@ type OpenClawSkillsMarketSummary struct {
 	CollectedAt      string                        `json:"collectedAt"`
 	SourceRepo       string                        `json:"sourceRepo"`
 	ManagedDirectory string                        `json:"managedDirectory"`
+	Query            string                        `json:"query,omitempty"`
+	Sort             string                        `json:"sort,omitempty"`
+	IsSearchResult   bool                          `json:"isSearchResult"`
 	TotalItems       int                           `json:"totalItems"`
 	Categories       []OpenClawSkillMarketCategory `json:"categories"`
 	Items            []OpenClawSkillMarketItem     `json:"items"`
@@ -64,13 +74,20 @@ type OpenClawSkillMarketCategory struct {
 }
 
 type OpenClawSkillMarketItem struct {
-	Slug        string   `json:"slug"`
-	Name        string   `json:"name"`
-	Summary     string   `json:"summary"`
-	Owner       string   `json:"owner"`
-	GitHubURL   string   `json:"githubUrl"`
-	RegistryURL string   `json:"registryUrl"`
-	CategoryIDs []string `json:"categoryIds"`
+	Slug            string   `json:"slug"`
+	Name            string   `json:"name"`
+	Summary         string   `json:"summary"`
+	SummaryZh       string   `json:"summaryZh,omitempty"`
+	Owner           string   `json:"owner,omitempty"`
+	GitHubURL       string   `json:"githubUrl,omitempty"`
+	RegistryURL     string   `json:"registryUrl"`
+	CategoryIDs     []string `json:"categoryIds"`
+	Tags            []string `json:"tags,omitempty"`
+	Downloads       int      `json:"downloads,omitempty"`
+	InstallsCurrent int      `json:"installsCurrent,omitempty"`
+	Stars           int      `json:"stars,omitempty"`
+	LatestVersion   string   `json:"latestVersion,omitempty"`
+	UpdatedAt       *string  `json:"updatedAt,omitempty"`
 }
 
 type OpenClawSkillsInventory struct {
@@ -223,6 +240,41 @@ type clawHubSkillDetailPayload struct {
 	} `json:"moderation"`
 }
 
+type clawHubSkillsListPayload struct {
+	Items      []clawHubSkillListItem `json:"items"`
+	NextCursor string                 `json:"nextCursor"`
+}
+
+type clawHubSkillListItem struct {
+	Slug          string            `json:"slug"`
+	DisplayName   string            `json:"displayName"`
+	Summary       string            `json:"summary"`
+	Tags          map[string]string `json:"tags"`
+	CreatedAt     int64             `json:"createdAt"`
+	UpdatedAt     int64             `json:"updatedAt"`
+	LatestVersion struct {
+		Version string `json:"version"`
+	} `json:"latestVersion"`
+	Stats struct {
+		Downloads       int `json:"downloads"`
+		InstallsAllTime int `json:"installsAllTime"`
+		InstallsCurrent int `json:"installsCurrent"`
+		Stars           int `json:"stars"`
+	} `json:"stats"`
+}
+
+type clawHubSearchPayload struct {
+	Results []clawHubSearchResult `json:"results"`
+}
+
+type clawHubSearchResult struct {
+	Slug        string  `json:"slug"`
+	DisplayName string  `json:"displayName"`
+	Summary     string  `json:"summary"`
+	Version     *string `json:"version"`
+	UpdatedAt   int64   `json:"updatedAt"`
+}
+
 type clawHubLockFile struct {
 	Version int                         `json:"version"`
 	Skills  map[string]clawHubLockSkill `json:"skills,omitempty"`
@@ -241,8 +293,35 @@ type clawHubOriginFile struct {
 	InstalledAt      int64   `json:"installedAt"`
 }
 
+type skillsMarketCategoryRule struct {
+	ID       string
+	Title    string
+	Keywords []string
+}
+
+var skillsMarketCategoryRules = []skillsMarketCategoryRule{
+	{ID: "automation", Title: "自动化", Keywords: []string{"automation", "automate", "workflow", "agent", "orchestrat", "任务流"}},
+	{ID: "browser-web", Title: "浏览器 / Web", Keywords: []string{"browser", "playwright", "web", "website", "page", "scrape", "crawl", "url", "网页", "浏览器"}},
+	{ID: "git-dev", Title: "Git / 开发", Keywords: []string{"git", "github", "repo", "pull request", "issue", "code", "devops", "ci", "开发", "代码"}},
+	{ID: "docs-knowledge", Title: "文档 / 知识", Keywords: []string{"docs", "documentation", "markdown", "wiki", "knowledge", "note", "文档", "知识", "笔记"}},
+	{ID: "productivity", Title: "办公 / 协作", Keywords: []string{"calendar", "notion", "slack", "discord", "email", "mail", "task", "todo", "reminder", "协作", "待办", "提醒", "日历"}},
+	{ID: "data-api", Title: "数据 / API", Keywords: []string{"api", "database", "sql", "postgres", "mysql", "sqlite", "json", "graphql", "数据", "数据库"}},
+	{ID: "media-files", Title: "媒体 / 文件", Keywords: []string{"pdf", "image", "video", "audio", "file", "document", "媒体", "文件", "图像", "音频"}},
+	{ID: "system-tools", Title: "系统 / 命令行", Keywords: []string{"terminal", "shell", "command", "filesystem", "system", "brew", "cli", "node", "系统", "终端"}},
+	{ID: "search-research", Title: "搜索 / 检索", Keywords: []string{"search", "find", "lookup", "discover", "research", "检索", "搜索", "发现"}},
+	{ID: "analysis-writing", Title: "分析 / 写作", Keywords: []string{"summary", "summarize", "analysis", "analyze", "report", "translate", "translation", "write", "摘要", "分析", "翻译", "写作"}},
+}
+
 func (app *App) handleOpenClawSkillsMarket(w http.ResponseWriter, r *http.Request) {
-	summary, err := app.buildOpenClawSkillsMarketSummary(r.URL.Query().Get("fresh") == "1")
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	if query == "" {
+		query = strings.TrimSpace(r.URL.Query().Get("q"))
+	}
+	summary, err := app.buildOpenClawSkillsMarketSummary(
+		r.URL.Query().Get("fresh") == "1",
+		query,
+		r.URL.Query().Get("sort"),
+	)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, err)
 		return
@@ -436,10 +515,22 @@ func (app *App) setOpenClawSkillEnabled(skillKey string, enabled bool, bundled b
 	}, nil
 }
 
-func (app *App) buildOpenClawSkillsMarketSummary(fresh bool) (OpenClawSkillsMarketSummary, error) {
+func (app *App) buildOpenClawSkillsMarketSummary(fresh bool, rawQuery, rawSort string) (OpenClawSkillsMarketSummary, error) {
+	query := strings.TrimSpace(rawQuery)
+	sortKey := normalizeSkillsMarketSort(rawSort)
+	if query != "" {
+		return app.buildSearchOpenClawSkillsMarketSummary(fresh, query, sortKey)
+	}
+	return app.buildDefaultOpenClawSkillsMarketSummary(fresh, sortKey)
+}
+
+func (app *App) buildDefaultOpenClawSkillsMarketSummary(fresh bool, sortKey string) (OpenClawSkillsMarketSummary, error) {
 	if !fresh {
 		app.mu.Lock()
-		if app.skillsMarketCache != nil && time.Since(app.skillsMarketCache.FetchedAt) <= skillsMarketCatalogTTL {
+		if app.skillsMarketCache != nil &&
+			time.Since(app.skillsMarketCache.FetchedAt) <= skillsMarketCatalogTTL &&
+			app.skillsMarketCache.Query == "" &&
+			app.skillsMarketCache.Sort == sortKey {
 			cached := app.skillsMarketCache.Summary
 			app.mu.Unlock()
 			return cached, nil
@@ -447,27 +538,709 @@ func (app *App) buildOpenClawSkillsMarketSummary(fresh bool) (OpenClawSkillsMark
 		app.mu.Unlock()
 	}
 
-	categories, items, err := app.fetchAwesomeCatalog()
+	items, err := fetchClawHubBrowseItems(sortKey)
 	if err != nil {
-		return OpenClawSkillsMarketSummary{}, err
+		categories, fallbackItems, fallbackErr := app.fetchAwesomeCatalog()
+		if fallbackErr != nil {
+			return OpenClawSkillsMarketSummary{}, err
+		}
+		summary := OpenClawSkillsMarketSummary{
+			CollectedAt:      nowISO(),
+			SourceRepo:       defaultAwesomeSkillsRepoURL,
+			ManagedDirectory: app.managerSkillsMarketDir(),
+			Sort:             sortKey,
+			TotalItems:       len(fallbackItems),
+			Categories:       categories,
+			Items:            fallbackItems,
+		}
+		app.mu.Lock()
+		app.skillsMarketCache = &cachedOpenClawSkillsMarketSummary{
+			Summary:   summary,
+			FetchedAt: time.Now(),
+			Query:     "",
+			Sort:      sortKey,
+		}
+		app.mu.Unlock()
+		return summary, nil
 	}
-	summary := OpenClawSkillsMarketSummary{
-		CollectedAt:      nowISO(),
-		SourceRepo:       defaultAwesomeSkillsRepoURL,
-		ManagedDirectory: app.managerSkillsMarketDir(),
-		TotalItems:       len(items),
-		Categories:       categories,
-		Items:            items,
-	}
+
+	summary := summarizeOpenClawSkillsMarketSummary(
+		app.managerSkillsMarketDir(),
+		clawHubSkillsListURL(sortKey, "", skillsMarketBrowsePageSize),
+		"",
+		sortKey,
+		false,
+		items,
+	)
 
 	app.mu.Lock()
 	app.skillsMarketCache = &cachedOpenClawSkillsMarketSummary{
 		Summary:   summary,
 		FetchedAt: time.Now(),
+		Query:     "",
+		Sort:      sortKey,
 	}
 	app.mu.Unlock()
 
 	return summary, nil
+}
+
+func (app *App) buildSearchOpenClawSkillsMarketSummary(fresh bool, query, sortKey string) (OpenClawSkillsMarketSummary, error) {
+	remoteItems, remoteErr := searchClawHubMarketItems(query)
+	merged := mergeMarketItems(nil, remoteItems)
+
+	browseItems, browseErr := fetchClawHubBrowseItems(sortKey)
+	if browseErr == nil {
+		merged = mergeMarketItems(merged, filterMarketItemsLocally(browseItems, query))
+	}
+	if len(merged) == 0 && remoteErr != nil && browseErr != nil {
+		return OpenClawSkillsMarketSummary{}, fmt.Errorf("搜索 ClawHub 失败: %w", remoteErr)
+	}
+	if len(merged) == 0 && remoteErr != nil {
+		return OpenClawSkillsMarketSummary{}, fmt.Errorf("搜索 ClawHub 失败，且本地热门列表未匹配到结果: %w", remoteErr)
+	}
+
+	sourceRepo := clawHubSearchURL(query, skillsMarketSearchLimit)
+	if remoteErr != nil && browseErr == nil {
+		sourceRepo = clawHubSkillsListURL(sortKey, "", skillsMarketBrowsePageSize)
+	}
+	return summarizeOpenClawSkillsMarketSummary(
+		app.managerSkillsMarketDir(),
+		sourceRepo,
+		query,
+		"relevance",
+		true,
+		merged,
+	), nil
+}
+
+func normalizeSkillsMarketSort(raw string) string {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "", "downloads":
+		return "downloads"
+	case "updated", "recent", "latest":
+		return "updated"
+	case "stars", "star":
+		return "stars"
+	case "installscurrent", "installs_current", "installs-current", "current-installs":
+		return "installsCurrent"
+	case "relevance":
+		return "relevance"
+	default:
+		return "downloads"
+	}
+}
+
+func clawHubSkillsListURL(sortKey, cursor string, limit int) string {
+	if limit <= 0 {
+		limit = skillsMarketBrowsePageSize
+	}
+	query := url.Values{}
+	query.Set("sort", normalizeSkillsMarketSort(sortKey))
+	query.Set("limit", strconv.Itoa(limit))
+	if strings.TrimSpace(cursor) != "" {
+		query.Set("cursor", strings.TrimSpace(cursor))
+	}
+	return clawHubAPIBaseURL() + "/skills?" + query.Encode()
+}
+
+func clawHubSearchURL(query string, limit int) string {
+	if limit <= 0 {
+		limit = skillsMarketSearchLimit
+	}
+	values := url.Values{}
+	values.Set("q", strings.TrimSpace(query))
+	values.Set("limit", strconv.Itoa(limit))
+	return clawHubAPIBaseURL() + "/search?" + values.Encode()
+}
+
+func fetchClawHubBrowseItems(sortKey string) ([]OpenClawSkillMarketItem, error) {
+	sortKey = normalizeSkillsMarketSort(sortKey)
+	cursor := ""
+	items := []OpenClawSkillMarketItem{}
+
+	for page := 0; page < skillsMarketBrowseMaxPages; page++ {
+		var payload clawHubSkillsListPayload
+		if err := fetchJSONWithTimeout(clawHubSkillsListURL(sortKey, cursor, skillsMarketBrowsePageSize), httpTimeout, &payload); err != nil {
+			if len(items) > 0 {
+				break
+			}
+			return nil, fmt.Errorf("读取 ClawHub 市场列表失败: %w", err)
+		}
+
+		batch := make([]OpenClawSkillMarketItem, 0, len(payload.Items))
+		for _, raw := range payload.Items {
+			if strings.TrimSpace(raw.Slug) == "" {
+				continue
+			}
+			name := firstNonEmpty(raw.DisplayName, raw.Slug)
+			categoryIDs := inferSkillsMarketCategoryIDs(name, raw.Summary)
+			batch = append(batch, OpenClawSkillMarketItem{
+				Slug:            raw.Slug,
+				Name:            name,
+				Summary:         strings.TrimSpace(raw.Summary),
+				SummaryZh:       localizeSkillSummary(name, raw.Summary, categoryIDs),
+				RegistryURL:     registryURLForSlug(raw.Slug),
+				CategoryIDs:     categoryIDs,
+				Tags:            mergeUniqueStrings(localizedSkillTags(categoryIDs), marketReadableTags(raw.Tags)),
+				Downloads:       raw.Stats.Downloads,
+				InstallsCurrent: raw.Stats.InstallsCurrent,
+				Stars:           raw.Stats.Stars,
+				LatestVersion:   strings.TrimSpace(raw.LatestVersion.Version),
+				UpdatedAt:       nullableTimeFromMillis(raw.UpdatedAt),
+			})
+		}
+
+		items = mergeMarketItems(items, batch)
+		cursor = strings.TrimSpace(payload.NextCursor)
+		if cursor == "" || len(payload.Items) == 0 {
+			break
+		}
+	}
+
+	if len(items) == 0 {
+		return nil, errors.New("ClawHub 市场列表为空")
+	}
+	return items, nil
+}
+
+func searchClawHubMarketItems(query string) ([]OpenClawSkillMarketItem, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+
+	var payload clawHubSearchPayload
+	if err := fetchJSONWithTimeout(clawHubSearchURL(query, skillsMarketSearchLimit), httpTimeout, &payload); err != nil {
+		return nil, fmt.Errorf("读取 ClawHub 搜索结果失败: %w", err)
+	}
+
+	items := make([]OpenClawSkillMarketItem, 0, len(payload.Results))
+	for _, raw := range payload.Results {
+		if strings.TrimSpace(raw.Slug) == "" {
+			continue
+		}
+		name := firstNonEmpty(raw.DisplayName, raw.Slug)
+		categoryIDs := inferSkillsMarketCategoryIDs(name, raw.Summary)
+		tags := localizedSkillTags(categoryIDs)
+		items = append(items, OpenClawSkillMarketItem{
+			Slug:          raw.Slug,
+			Name:          name,
+			Summary:       strings.TrimSpace(raw.Summary),
+			SummaryZh:     localizeSkillSummary(name, raw.Summary, categoryIDs),
+			RegistryURL:   registryURLForSlug(raw.Slug),
+			CategoryIDs:   categoryIDs,
+			Tags:          tags,
+			LatestVersion: strings.TrimSpace(derefString(raw.Version)),
+			UpdatedAt:     nullableTimeFromMillis(raw.UpdatedAt),
+		})
+	}
+
+	return items, nil
+}
+
+func summarizeOpenClawSkillsMarketSummary(
+	managedDirectory, sourceRepo, query, sortKey string,
+	isSearchResult bool,
+	items []OpenClawSkillMarketItem,
+) OpenClawSkillsMarketSummary {
+	normalizedItems := make([]OpenClawSkillMarketItem, 0, len(items))
+	categoryCounts := map[string]int{}
+
+	for _, item := range items {
+		item.Slug = strings.TrimSpace(item.Slug)
+		if item.Slug == "" {
+			continue
+		}
+		item.Name = firstNonEmpty(strings.TrimSpace(item.Name), item.Slug)
+		item.Summary = strings.TrimSpace(item.Summary)
+		if len(item.CategoryIDs) == 0 {
+			item.CategoryIDs = inferSkillsMarketCategoryIDs(item.Name, item.Summary)
+		}
+		if strings.TrimSpace(item.SummaryZh) == "" {
+			item.SummaryZh = localizeSkillSummary(item.Name, item.Summary, item.CategoryIDs)
+		}
+		item.CategoryIDs = mergeUniqueStrings(nil, item.CategoryIDs)
+		if len(item.Tags) == 0 {
+			item.Tags = localizedSkillTags(item.CategoryIDs)
+		} else {
+			item.Tags = mergeUniqueStrings(localizedSkillTags(item.CategoryIDs), item.Tags)
+		}
+		if strings.TrimSpace(item.RegistryURL) == "" {
+			item.RegistryURL = registryURLForSlug(item.Slug)
+		}
+		for _, categoryID := range item.CategoryIDs {
+			categoryCounts[categoryID]++
+		}
+		normalizedItems = append(normalizedItems, item)
+	}
+
+	categories := make([]OpenClawSkillMarketCategory, 0, len(categoryCounts))
+	for categoryID, count := range categoryCounts {
+		categories = append(categories, OpenClawSkillMarketCategory{
+			ID:    categoryID,
+			Title: skillsMarketCategoryTitle(categoryID),
+			Count: count,
+		})
+	}
+	sort.Slice(categories, func(i, j int) bool {
+		if categories[i].Count != categories[j].Count {
+			return categories[i].Count > categories[j].Count
+		}
+		return strings.ToLower(categories[i].Title) < strings.ToLower(categories[j].Title)
+	})
+	if len(categories) > skillsMarketMaxCategoryCount {
+		categories = append([]OpenClawSkillMarketCategory(nil), categories[:skillsMarketMaxCategoryCount]...)
+	}
+
+	return OpenClawSkillsMarketSummary{
+		CollectedAt:      nowISO(),
+		SourceRepo:       firstNonEmpty(strings.TrimSpace(sourceRepo), clawHubSkillsListURL(sortKey, "", skillsMarketBrowsePageSize)),
+		ManagedDirectory: managedDirectory,
+		Query:            strings.TrimSpace(query),
+		Sort:             normalizeSkillsMarketSort(sortKey),
+		IsSearchResult:   isSearchResult,
+		TotalItems:       len(normalizedItems),
+		Categories:       categories,
+		Items:            normalizedItems,
+	}
+}
+
+func mergeMarketItems(base []OpenClawSkillMarketItem, incoming []OpenClawSkillMarketItem) []OpenClawSkillMarketItem {
+	order := make([]string, 0, len(base)+len(incoming))
+	merged := map[string]OpenClawSkillMarketItem{}
+
+	apply := func(item OpenClawSkillMarketItem) {
+		slug := strings.TrimSpace(item.Slug)
+		if slug == "" {
+			return
+		}
+		item.Slug = slug
+		existing, ok := merged[slug]
+		if !ok {
+			merged[slug] = item
+			order = append(order, slug)
+			return
+		}
+
+		if betterMarketString(item.Name, existing.Name) {
+			existing.Name = item.Name
+		}
+		if betterMarketString(item.Summary, existing.Summary) {
+			existing.Summary = item.Summary
+		}
+		if betterMarketString(item.SummaryZh, existing.SummaryZh) {
+			existing.SummaryZh = item.SummaryZh
+		}
+		if betterMarketString(item.Owner, existing.Owner) {
+			existing.Owner = item.Owner
+		}
+		if betterMarketString(item.GitHubURL, existing.GitHubURL) {
+			existing.GitHubURL = item.GitHubURL
+		}
+		if betterMarketString(item.RegistryURL, existing.RegistryURL) {
+			existing.RegistryURL = item.RegistryURL
+		}
+		if betterMarketString(item.LatestVersion, existing.LatestVersion) {
+			existing.LatestVersion = item.LatestVersion
+		}
+		existing.CategoryIDs = mergeUniqueStrings(existing.CategoryIDs, item.CategoryIDs)
+		existing.Tags = mergeUniqueStrings(existing.Tags, item.Tags)
+		if item.Downloads > existing.Downloads {
+			existing.Downloads = item.Downloads
+		}
+		if item.InstallsCurrent > existing.InstallsCurrent {
+			existing.InstallsCurrent = item.InstallsCurrent
+		}
+		if item.Stars > existing.Stars {
+			existing.Stars = item.Stars
+		}
+		if newerMarketTimestamp(item.UpdatedAt, existing.UpdatedAt) {
+			existing.UpdatedAt = item.UpdatedAt
+		}
+		merged[slug] = existing
+	}
+
+	for _, item := range base {
+		apply(item)
+	}
+	for _, item := range incoming {
+		apply(item)
+	}
+
+	out := make([]OpenClawSkillMarketItem, 0, len(order))
+	for _, slug := range order {
+		out = append(out, merged[slug])
+	}
+	return out
+}
+
+func filterMarketItemsLocally(items []OpenClawSkillMarketItem, query string) []OpenClawSkillMarketItem {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return append([]OpenClawSkillMarketItem(nil), items...)
+	}
+
+	type scoredItem struct {
+		Item  OpenClawSkillMarketItem
+		Score int
+	}
+
+	terms := expandSkillsMarketSearchTerms(query)
+	scored := make([]scoredItem, 0, len(items))
+	for _, item := range items {
+		score := scoreSkillsMarketItem(item, query, terms)
+		if score <= 0 {
+			continue
+		}
+		scored = append(scored, scoredItem{Item: item, Score: score})
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].Score != scored[j].Score {
+			return scored[i].Score > scored[j].Score
+		}
+		if scored[i].Item.Downloads != scored[j].Item.Downloads {
+			return scored[i].Item.Downloads > scored[j].Item.Downloads
+		}
+		if scored[i].Item.Stars != scored[j].Item.Stars {
+			return scored[i].Item.Stars > scored[j].Item.Stars
+		}
+		return strings.ToLower(scored[i].Item.Name) < strings.ToLower(scored[j].Item.Name)
+	})
+
+	out := make([]OpenClawSkillMarketItem, 0, len(scored))
+	for _, entry := range scored {
+		out = append(out, entry.Item)
+	}
+	return out
+}
+
+func scoreSkillsMarketItem(item OpenClawSkillMarketItem, query string, terms []string) int {
+	score := 0
+	score += marketFieldScore(item.Name, query, 160)
+	score += marketFieldScore(item.Slug, query, 150)
+	score += marketFieldScore(item.SummaryZh, query, 120)
+	score += marketFieldScore(item.Summary, query, 100)
+	score += marketFieldScore(item.Owner, query, 80)
+	score += marketFieldScore(strings.Join(item.Tags, " "), query, 70)
+	score += marketFieldScore(strings.Join(item.CategoryIDs, " "), query, 60)
+
+	for _, term := range terms {
+		if strings.EqualFold(strings.TrimSpace(term), strings.TrimSpace(query)) {
+			continue
+		}
+		score += marketFieldScore(item.Name, term, 65)
+		score += marketFieldScore(item.Slug, term, 60)
+		score += marketFieldScore(item.SummaryZh, term, 55)
+		score += marketFieldScore(item.Summary, term, 45)
+		score += marketFieldScore(strings.Join(item.Tags, " "), term, 35)
+	}
+
+	return score
+}
+
+func marketFieldScore(value, query string, weight int) int {
+	if !marketContains(value, query) {
+		return 0
+	}
+	return weight
+}
+
+func marketContains(value, query string) bool {
+	query = strings.TrimSpace(query)
+	value = strings.TrimSpace(value)
+	if query == "" || value == "" {
+		return false
+	}
+	lowerValue := strings.ToLower(value)
+	lowerQuery := strings.ToLower(query)
+	if strings.Contains(lowerValue, lowerQuery) {
+		return true
+	}
+	return strings.Contains(normalizeSearchableText(lowerValue), normalizeSearchableText(lowerQuery))
+}
+
+func normalizeSearchableText(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	lastSpace := true
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), unicode.In(r, unicode.Han):
+			builder.WriteRune(r)
+			lastSpace = false
+		default:
+			if !lastSpace {
+				builder.WriteByte(' ')
+				lastSpace = true
+			}
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func expandSkillsMarketSearchTerms(query string) []string {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return nil
+	}
+	terms := []string{query}
+	for _, token := range strings.Fields(normalizeSearchableText(query)) {
+		terms = append(terms, token)
+	}
+	aliases := map[string][]string{
+		"天气":     {"weather", "forecast"},
+		"浏览器":    {"browser", "playwright", "web"},
+		"网页":     {"web", "browser", "site"},
+		"搜索":     {"search", "find", "discover"},
+		"检索":     {"search", "lookup", "discover"},
+		"总结":     {"summary", "summarize", "report"},
+		"摘要":     {"summary", "summarize"},
+		"翻译":     {"translate", "translation", "localization"},
+		"提醒":     {"reminder", "todo", "task"},
+		"待办":     {"todo", "task", "reminder"},
+		"日历":     {"calendar", "schedule"},
+		"文档":     {"docs", "documentation", "markdown"},
+		"数据库":    {"database", "sql", "postgres", "mysql", "sqlite"},
+		"邮件":     {"email", "mail", "gmail"},
+		"pdf":    {"pdf", "document"},
+		"图片":     {"image", "photo", "vision"},
+		"音频":     {"audio", "speech", "voice"},
+		"视频":     {"video", "media"},
+		"github": {"github", "git", "repo", "pull request", "issue"},
+		"git":    {"git", "github", "repo", "pull request"},
+		"notion": {"notion"},
+	}
+	for key, extras := range aliases {
+		if strings.Contains(query, key) {
+			terms = append(terms, extras...)
+		}
+	}
+	for _, rule := range skillsMarketCategoryRules {
+		if marketContains(rule.Title, query) {
+			terms = append(terms, rule.Keywords...)
+			continue
+		}
+		for _, keyword := range rule.Keywords {
+			if marketContains(keyword, query) || marketContains(query, keyword) {
+				terms = append(terms, rule.Keywords...)
+				break
+			}
+		}
+	}
+	return mergeUniqueStrings(nil, terms)
+}
+
+func inferSkillsMarketCategoryIDs(name, summary string) []string {
+	text := strings.ToLower(strings.TrimSpace(name + " " + summary))
+	out := make([]string, 0, 3)
+	for _, rule := range skillsMarketCategoryRules {
+		for _, keyword := range rule.Keywords {
+			if marketContains(text, keyword) {
+				out = append(out, rule.ID)
+				break
+			}
+		}
+		if len(out) >= 3 {
+			break
+		}
+	}
+	return mergeUniqueStrings(nil, out)
+}
+
+func skillsMarketCategoryTitle(categoryID string) string {
+	for _, rule := range skillsMarketCategoryRules {
+		if rule.ID == categoryID {
+			return rule.Title
+		}
+	}
+	if categoryID == "" {
+		return "未分类"
+	}
+	return categoryID
+}
+
+func localizedSkillTags(categoryIDs []string) []string {
+	tags := make([]string, 0, len(categoryIDs))
+	for _, categoryID := range categoryIDs {
+		title := skillsMarketCategoryTitle(categoryID)
+		if strings.TrimSpace(title) == "" || title == categoryID {
+			continue
+		}
+		tags = append(tags, title)
+	}
+	return mergeUniqueStrings(nil, tags)
+}
+
+func marketReadableTags(values map[string]string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := strings.TrimSpace(values[key])
+		switch key {
+		case "latest":
+			if value != "" {
+				out = append(out, "v"+value)
+			}
+		default:
+			if value != "" {
+				out = append(out, value)
+			} else if strings.TrimSpace(key) != "" {
+				out = append(out, key)
+			}
+		}
+	}
+	return mergeUniqueStrings(nil, out)
+}
+
+func localizeSkillSummary(name, summary string, categories []string) string {
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return fallbackLocalizedSkillSummary(name, categories)
+	}
+	if containsHan(summary) {
+		return summary
+	}
+
+	lower := strings.ToLower(summary)
+	switch {
+	case strings.Contains(lower, "notion"):
+		return "通过 Notion API 处理页面、数据库与内容块。"
+	case strings.Contains(lower, "discover and install agent skills"):
+		return "帮助发现并安装可用技能，适合扩展代理能力时使用。"
+	case strings.Contains(lower, "github") || strings.Contains(lower, "pull request") || strings.Contains(lower, "issue"):
+		return "处理 GitHub 仓库、Issue、PR 与代码协作流程。"
+	case strings.Contains(lower, "pdf"):
+		return "处理 PDF 的读取、提取、总结或转换。"
+	case strings.Contains(lower, "calendar"):
+		return "读取和管理日历事件、日程与提醒。"
+	case strings.Contains(lower, "slack"):
+		return "连接 Slack，处理频道消息与协作通知。"
+	case strings.Contains(lower, "discord"):
+		return "连接 Discord，处理频道消息与机器人协作。"
+	case strings.Contains(lower, "email") || strings.Contains(lower, "gmail") || strings.Contains(lower, "mail"):
+		return "处理邮件读取、检索与整理。"
+	case strings.Contains(lower, "weather") || strings.Contains(lower, "forecast"):
+		return "提供天气查询与天气预报能力。"
+	case strings.Contains(lower, "browser") || strings.Contains(lower, "playwright") || strings.Contains(lower, "website"):
+		return "用于网页浏览、抓取与浏览器自动化。"
+	case strings.Contains(lower, "search") || strings.Contains(lower, "discover") || strings.Contains(lower, "find"):
+		return "用于搜索、发现和筛选相关技能或信息。"
+	case strings.Contains(lower, "summary") || strings.Contains(lower, "summarize"):
+		return "用于摘要、总结与信息压缩。"
+	case strings.Contains(lower, "translate") || strings.Contains(lower, "translation"):
+		return "提供翻译与本地化辅助。"
+	case strings.Contains(lower, "database") || strings.Contains(lower, "sql") || strings.Contains(lower, "postgres") || strings.Contains(lower, "mysql") || strings.Contains(lower, "sqlite"):
+		return "用于数据库查询、读写与结构化数据处理。"
+	case strings.Contains(lower, "task") || strings.Contains(lower, "todo") || strings.Contains(lower, "reminder"):
+		return "用于任务、待办与提醒管理。"
+	case strings.Contains(lower, "learn") || strings.Contains(lower, "error") || strings.Contains(lower, "continuous improvement"):
+		return "记录经验、错误与修正，帮助代理持续改进。"
+	}
+
+	prefix := localizedSummaryPrefix(name, categories, lower)
+	switch {
+	case strings.Contains(lower, "create") && strings.Contains(lower, "manage"):
+		return prefix + "支持创建、管理和更新相关内容。"
+	case strings.Contains(lower, "query") || strings.Contains(lower, "read"):
+		return prefix + "支持读取、查询和整理相关信息。"
+	case strings.Contains(lower, "analy") || strings.Contains(lower, "report"):
+		return prefix + "适合分析、总结与生成报告。"
+	case strings.Contains(lower, "install"):
+		return prefix + "支持发现、安装与维护相关能力。"
+	default:
+		return prefix + "可帮助代理完成相关任务。"
+	}
+}
+
+func localizedSummaryPrefix(name string, categories []string, lowerSummary string) string {
+	switch {
+	case strings.Contains(lowerSummary, "api"):
+		if domain := fallbackLocalizedSkillSummary(name, categories); domain != "" {
+			return strings.TrimSuffix(domain, "。") + "，"
+		}
+	case strings.Contains(lowerSummary, "workflow") || strings.Contains(lowerSummary, "agent"):
+		return "用于自动化工作流与代理协作，"
+	}
+	return strings.TrimSuffix(fallbackLocalizedSkillSummary(name, categories), "。") + "，"
+}
+
+func fallbackLocalizedSkillSummary(name string, categories []string) string {
+	if len(categories) > 0 {
+		labels := localizedSkillTags(categories)
+		if len(labels) > 0 {
+			return fmt.Sprintf("面向%s的技能。", strings.Join(labels, "、"))
+		}
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "用于扩展代理能力的技能。"
+	}
+	return fmt.Sprintf("围绕 %s 的技能。", name)
+}
+
+func containsHan(value string) bool {
+	for _, r := range value {
+		if unicode.In(r, unicode.Han) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeUniqueStrings(left []string, right []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(left)+len(right))
+	push := func(values []string) {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	push(left)
+	push(right)
+	return out
+}
+
+func betterMarketString(candidate, existing string) bool {
+	candidate = strings.TrimSpace(candidate)
+	existing = strings.TrimSpace(existing)
+	if candidate == "" {
+		return false
+	}
+	if existing == "" {
+		return true
+	}
+	return len(candidate) > len(existing)
+}
+
+func newerMarketTimestamp(candidate, existing *string) bool {
+	if candidate == nil || strings.TrimSpace(*candidate) == "" {
+		return false
+	}
+	if existing == nil || strings.TrimSpace(*existing) == "" {
+		return true
+	}
+	return strings.TrimSpace(*candidate) > strings.TrimSpace(*existing)
 }
 
 func (app *App) fetchOpenClawSkillMarketDetail(rawSlug string, fresh bool) (OpenClawSkillMarketDetail, error) {
@@ -486,11 +1259,11 @@ func (app *App) fetchOpenClawSkillMarketDetail(rawSlug string, fresh bool) (Open
 		app.mu.Unlock()
 	}
 
-	marketSummary, err := app.buildOpenClawSkillsMarketSummary(false)
-	if err != nil {
-		return OpenClawSkillMarketDetail{}, err
+	marketSummary, marketErr := app.buildDefaultOpenClawSkillsMarketSummary(false, normalizeSkillsMarketSort(""))
+	var item *OpenClawSkillMarketItem
+	if marketErr == nil {
+		item = findMarketItemBySlug(marketSummary.Items, slug)
 	}
-	item := findMarketItemBySlug(marketSummary.Items, slug)
 
 	var payload clawHubSkillDetailPayload
 	if err := fetchJSONWithTimeout(clawHubSkillDetailURL(slug), httpTimeout, &payload); err != nil {
@@ -498,11 +1271,55 @@ func (app *App) fetchOpenClawSkillMarketDetail(rawSlug string, fresh bool) (Open
 	}
 
 	if item == nil {
+		categoryIDs := inferSkillsMarketCategoryIDs(firstNonEmpty(payload.Skill.DisplayName, slug), payload.Skill.Summary)
 		item = &OpenClawSkillMarketItem{
-			Slug:        slug,
-			Name:        firstNonEmpty(payload.Skill.DisplayName, slug),
-			Summary:     payload.Skill.Summary,
-			RegistryURL: registryURLForSlug(slug),
+			Slug:            slug,
+			Name:            firstNonEmpty(payload.Skill.DisplayName, slug),
+			Summary:         payload.Skill.Summary,
+			SummaryZh:       localizeSkillSummary(firstNonEmpty(payload.Skill.DisplayName, slug), payload.Skill.Summary, categoryIDs),
+			Owner:           firstNonEmpty(payload.Owner.DisplayName, payload.Owner.Handle),
+			RegistryURL:     registryURLForSlug(slug),
+			CategoryIDs:     categoryIDs,
+			Tags:            localizedSkillTags(categoryIDs),
+			Downloads:       payload.Skill.Stats.Downloads,
+			InstallsCurrent: payload.Skill.Stats.InstallsCurrent,
+			Stars:           payload.Skill.Stats.Stars,
+			LatestVersion:   payload.LatestVersion.Version,
+			UpdatedAt:       nullableTimeFromMillis(payload.Skill.UpdatedAt),
+		}
+	} else {
+		if strings.TrimSpace(item.Name) == "" {
+			item.Name = firstNonEmpty(payload.Skill.DisplayName, slug)
+		}
+		if strings.TrimSpace(item.Summary) == "" {
+			item.Summary = payload.Skill.Summary
+		}
+		if len(item.CategoryIDs) == 0 {
+			item.CategoryIDs = inferSkillsMarketCategoryIDs(item.Name, item.Summary)
+		}
+		if len(item.Tags) == 0 {
+			item.Tags = localizedSkillTags(item.CategoryIDs)
+		}
+		if strings.TrimSpace(item.SummaryZh) == "" {
+			item.SummaryZh = localizeSkillSummary(item.Name, item.Summary, item.CategoryIDs)
+		}
+		if strings.TrimSpace(item.Owner) == "" {
+			item.Owner = firstNonEmpty(payload.Owner.DisplayName, payload.Owner.Handle)
+		}
+		if item.Downloads == 0 {
+			item.Downloads = payload.Skill.Stats.Downloads
+		}
+		if item.InstallsCurrent == 0 {
+			item.InstallsCurrent = payload.Skill.Stats.InstallsCurrent
+		}
+		if item.Stars == 0 {
+			item.Stars = payload.Skill.Stats.Stars
+		}
+		if strings.TrimSpace(item.LatestVersion) == "" {
+			item.LatestVersion = payload.LatestVersion.Version
+		}
+		if item.UpdatedAt == nil {
+			item.UpdatedAt = nullableTimeFromMillis(payload.Skill.UpdatedAt)
 		}
 	}
 
@@ -549,6 +1366,9 @@ func (app *App) fetchOpenClawSkillMarketDetail(rawSlug string, fresh bool) (Open
 	}
 
 	app.mu.Lock()
+	if app.skillsMarketDetailCache == nil {
+		app.skillsMarketDetailCache = map[string]cachedOpenClawSkillMarketDetail{}
+	}
 	app.skillsMarketDetailCache[slug] = cachedOpenClawSkillMarketDetail{
 		Detail:    detail,
 		FetchedAt: time.Now(),
@@ -892,10 +1712,12 @@ func (app *App) fetchAwesomeCatalog() ([]OpenClawSkillMarketCategory, []OpenClaw
 					Slug:        item.Slug,
 					Name:        item.Name,
 					Summary:     item.Summary,
+					SummaryZh:   localizeSkillSummary(item.Name, item.Summary, []string{item.CategoryID}),
 					Owner:       item.Owner,
 					GitHubURL:   item.GitHubURL,
 					RegistryURL: registryURLForSlug(item.Slug),
 					CategoryIDs: []string{item.CategoryID},
+					Tags:        []string{item.CategoryName},
 				}
 				continue
 			}
@@ -915,6 +1737,8 @@ func (app *App) fetchAwesomeCatalog() ([]OpenClawSkillMarketCategory, []OpenClaw
 				existing.CategoryIDs = append(existing.CategoryIDs, item.CategoryID)
 				sort.Strings(existing.CategoryIDs)
 			}
+			existing.Tags = mergeUniqueStrings(existing.Tags, []string{item.CategoryName})
+			existing.SummaryZh = localizeSkillSummary(existing.Name, existing.Summary, existing.CategoryIDs)
 			bySlug[item.Slug] = existing
 		}
 	}
@@ -1463,7 +2287,7 @@ func (app *App) resolveInstallSkillDetail(slug string) (OpenClawSkillMarketDetai
 		return detail, "", nil
 	}
 
-	marketSummary, marketErr := app.buildOpenClawSkillsMarketSummary(false)
+	marketSummary, marketErr := app.buildDefaultOpenClawSkillsMarketSummary(false, normalizeSkillsMarketSort(""))
 	if marketErr != nil {
 		return OpenClawSkillMarketDetail{}, "", err
 	}
@@ -1727,16 +2551,20 @@ func clawHubAPIBaseURL() string {
 	return base
 }
 
+func clawHubWebBaseURL() string {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("OPENCLAW_CLAWHUB_WEB_BASE_URL")), "/")
+	if base == "" {
+		base = defaultClawHubWebBaseURL
+	}
+	return base
+}
+
 func clawHubSkillDetailURL(slug string) string {
 	return clawHubAPIBaseURL() + "/skills/" + url.PathEscape(slug)
 }
 
 func registryURLForSlug(slug string) string {
-	base := strings.TrimRight(strings.TrimSpace(os.Getenv("OPENCLAW_CLAWHUB_WEB_BASE_URL")), "/")
-	if base == "" {
-		base = defaultClawHubWebBaseURL
-	}
-	return base + "/" + url.PathEscape(slug)
+	return clawHubWebBaseURL() + "/skills/" + url.PathEscape(slug)
 }
 
 func fetchTextWithTimeout(targetURL string, timeout time.Duration) (string, error) {

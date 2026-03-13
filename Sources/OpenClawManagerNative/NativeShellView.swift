@@ -2798,13 +2798,26 @@ private func skillsInventorySourceTint(_ source: String) -> Color {
 
 private func skillsMarketItemCategories(_ item: OpenClawSkillsMarketSummary.Item, categories: [String: String]) -> String {
     let titles = item.categoryIds.compactMap { categories[$0] }
-    if titles.isEmpty {
+    if !titles.isEmpty {
+        if titles.count <= 2 {
+            return titles.joined(separator: " · ")
+        }
+        return "\(titles.prefix(2).joined(separator: " · ")) +\(titles.count - 2)"
+    }
+    if item.tags.isEmpty {
         return "未分类"
     }
-    if titles.count <= 2 {
-        return titles.joined(separator: " · ")
+    if item.tags.count <= 3 {
+        return item.tags.joined(separator: " · ")
     }
-    return "\(titles.prefix(2).joined(separator: " · ")) +\(titles.count - 2)"
+    return "\(item.tags.prefix(3).joined(separator: " · ")) +\(item.tags.count - 3)"
+}
+
+private func hasLocalizedMarketSummary(_ item: OpenClawSkillsMarketSummary.Item) -> Bool {
+    guard let summaryZh = item.summaryZh?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+        return false
+    }
+    return !summaryZh.isEmpty && summaryZh != item.summary
 }
 
 private func skillModerationPresentation(_ moderation: OpenClawSkillMarketDetail.Moderation?) -> (label: String, tint: Color, foreground: Color) {
@@ -2948,6 +2961,7 @@ private struct SkillsSection: View {
     @ObservedObject var store: NativeAppStore
     @State private var activeWorkspace: SkillsWorkspace = .market
     @State private var marketSearchText = ""
+    @State private var marketSort: SkillsMarketSort = .downloads
     @State private var inventorySearchText = ""
     @State private var selectedCategoryID = ""
     @State private var selectedSkillSlug: String?
@@ -2955,7 +2969,9 @@ private struct SkillsSection: View {
     @State private var showMarketEnvironment = false
     @State private var showDetailRequirements = false
     @State private var showDetailChangelog = false
+    @State private var showDetailOriginalSummary = false
     @State private var expandedInventoryGroups: Set<String> = ["manager-installed", "personal"]
+    @State private var marketSearchTask: Task<Void, Never>?
 
     private var categoryLookup: [String: String] {
         Dictionary(uniqueKeysWithValues: (store.skillsMarketSummary?.categories ?? []).map { ($0.id, $0.title) })
@@ -2971,26 +2987,21 @@ private struct SkillsSection: View {
 
     private var filteredMarketItems: [OpenClawSkillsMarketSummary.Item] {
         guard let items = store.skillsMarketSummary?.items else { return [] }
-        let query = marketSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return items.filter { item in
-            let matchesQuery: Bool
-            if query.isEmpty {
-                matchesQuery = true
-            } else {
-                matchesQuery =
-                    item.name.lowercased().contains(query) ||
-                    item.slug.lowercased().contains(query) ||
-                    item.owner.lowercased().contains(query) ||
-                    item.summary.lowercased().contains(query)
-            }
             let matchesCategory = selectedCategoryID.isEmpty || item.categoryIds.contains(selectedCategoryID)
-            return matchesQuery && matchesCategory
+            return matchesCategory
         }
     }
 
     private var displayedMarketItems: [OpenClawSkillsMarketSummary.Item] {
-        let limit = (marketSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && selectedCategoryID.isEmpty) ? 72 : 180
-        return Array(filteredMarketItems.prefix(limit))
+        let items = filteredMarketItems
+        let limit = (!isMarketSearching && selectedCategoryID.isEmpty) ? 96 : 180
+        guard items.count > limit else { return items }
+        return Array(items.prefix(limit))
+    }
+
+    private var isClippingMarketItems: Bool {
+        filteredMarketItems.count > displayedMarketItems.count
     }
 
     private var filteredInventoryItems: [OpenClawSkillsInventory.Item] {
@@ -3049,6 +3060,14 @@ private struct SkillsSection: View {
         return nil
     }
 
+    private var trimmedMarketSearchText: String {
+        marketSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isMarketSearching: Bool {
+        !trimmedMarketSearchText.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             SectionLead(
@@ -3068,7 +3087,7 @@ private struct SkillsSection: View {
                     InlineStatusColumn(
                         title: "精选市场",
                         value: "\(store.skillsMarketSummary?.totalItems ?? 0) 个",
-                        detail: "来自 awesome-openclaw-skills",
+                        detail: isMarketSearching ? "ClawHub 搜索结果" : "ClawHub \(marketSort.title) 排序",
                         accent: NativePalette.accent
                     )
                     InlineStatusColumn(
@@ -3192,8 +3211,34 @@ private struct SkillsSection: View {
         GridCard(title: "浏览与筛选", systemImage: "line.3.horizontal.decrease.circle", accent: NativePalette.accent) {
             VStack(alignment: .leading, spacing: 14) {
                 AdaptiveLine(spacing: 12) {
-                    TextField("按名称、slug、作者搜索", text: $marketSearchText)
+                    TextField("搜索名称、slug 或用途", text: $marketSearchText)
                         .textFieldStyle(.roundedBorder)
+                        .onSubmit {
+                            triggerMarketSearch(immediate: true)
+                        }
+                        .onChange(of: marketSearchText) { _ in
+                            selectedCategoryID = ""
+                            scheduleMarketSearch()
+                        }
+                    Picker("排序", selection: $marketSort) {
+                        ForEach(SkillsMarketSort.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+                    .onChange(of: marketSort) { _ in
+                        selectedCategoryID = ""
+                        triggerMarketSearch(immediate: true)
+                    }
+                    if isMarketSearching {
+                        Button("清空") {
+                            marketSearchText = ""
+                            selectedCategoryID = ""
+                            triggerMarketSearch(immediate: true)
+                        }
+                        .buttonStyle(NativeSecondaryButtonStyle())
+                    }
                     if let managedDirectory = store.skillsInventory?.managedDirectory {
                         Button("打开托管目录") {
                             store.open(URL(fileURLWithPath: managedDirectory))
@@ -3213,15 +3258,17 @@ private struct SkillsSection: View {
                 }
 
                 HStack {
-                    Text("筛选后 \(filteredMarketItems.count) 项，当前展示 \(displayedMarketItems.count) 项")
+                    Text(isMarketSearching
+                        ? "ClawHub 搜索返回 \(filteredMarketItems.count) 项"
+                        : "当前列表 \(filteredMarketItems.count) 项，按 \(marketSort.title) 排序")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    if filteredMarketItems.count > displayedMarketItems.count {
-                        Text("继续缩小范围会更容易挑选")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(isClippingMarketItems
+                        ? "当前先渲染前 \(displayedMarketItems.count) 项，继续筛选会更快"
+                        : "支持粘贴后直接回车搜索")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 DisclosureGroup(isExpanded: $showMarketEnvironment) {
@@ -3262,10 +3309,10 @@ private struct SkillsSection: View {
     }
 
     private var marketListCard: some View {
-        GridCard(title: "结果列表", subtitle: "awesome-openclaw-skills", systemImage: "square.stack.3d.up.fill", accent: NativePalette.accent) {
+        GridCard(title: "结果列表", subtitle: "ClawHub", systemImage: "square.stack.3d.up.fill", accent: NativePalette.accent) {
             VStack(alignment: .leading, spacing: 14) {
                 if let marketSummary = store.skillsMarketSummary {
-                    VStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(displayedMarketItems) { item in
                             marketRow(item, selected: selectedSkillSlug == item.slug)
                         }
@@ -3276,9 +3323,15 @@ private struct SkillsSection: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Text("目录快照: \(formatDate(marketSummary.collectedAt))")
+                    Text("市场快照: \(formatDate(marketSummary.collectedAt))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if isClippingMarketItems {
+                        Text("为保证输入流畅，默认只渲染前 \(displayedMarketItems.count) 项。继续搜索或按分类筛选可以更快定位。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
                     Text("等待技能市场摘要。")
                         .foregroundStyle(.secondary)
@@ -3294,6 +3347,7 @@ private struct SkillsSection: View {
             activeWorkspace = .market
             showDetailRequirements = false
             showDetailChangelog = false
+            showDetailOriginalSummary = false
             store.loadSkillMarketDetail(slug: item.slug)
         } label: {
             VStack(alignment: .leading, spacing: 10) {
@@ -3313,13 +3367,15 @@ private struct SkillsSection: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    Text(item.owner)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if let owner = item.owner, !owner.isEmpty {
+                        Text(owner)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
-                Text(item.summary)
+                Text(item.preferredSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -3331,6 +3387,11 @@ private struct SkillsSection: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer()
+                    if let downloads = item.downloads {
+                        Text("下载 \(downloads)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     if let installed {
                         Text(installed.uninstallable ? "可卸载" : "本机已存在")
                             .font(.caption)
@@ -3375,10 +3436,25 @@ private struct SkillsSection: View {
                             TonePill(text: moderation.label, tint: moderation.tint, foreground: moderation.foreground)
                         }
 
-                        Text(detail.item.summary)
+                        Text(detail.item.preferredSummary)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if hasLocalizedMarketSummary(detail.item) {
+                        DisclosureGroup(isExpanded: $showDetailOriginalSummary) {
+                            Text(detail.item.summary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 10)
+                        } label: {
+                            Text("原文说明")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(NativePalette.ink)
+                        }
+                        .tint(NativePalette.ink)
                     }
 
                     if let installed {
@@ -3401,7 +3477,7 @@ private struct SkillsSection: View {
 
                     TwoColumnFacts(items: [
                         ("slug", detail.item.slug),
-                        ("作者", present(detail.owner?.displayName ?? detail.owner?.handle, fallback: detail.item.owner)),
+                        ("作者", present(detail.owner?.displayName ?? detail.owner?.handle, fallback: detail.item.owner ?? "未提供")),
                         ("最新版本", present(detail.latestVersion?.version)),
                         ("下载量", "\(detail.stats.downloads)"),
                         ("Stars", "\(detail.stats.stars)"),
@@ -3477,7 +3553,7 @@ private struct SkillsSection: View {
                             }
                             .buttonStyle(NativeSecondaryButtonStyle())
                         }
-                        if let url = URL(string: detail.item.githubUrl) {
+                        if let githubURL = detail.item.githubUrl, let url = URL(string: githubURL) {
                             Button("打开源码") {
                                 store.open(url)
                             }
@@ -3687,6 +3763,26 @@ private struct SkillsSection: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(NativePalette.surfaceAlt)
         )
+    }
+
+    private func scheduleMarketSearch() {
+        marketSearchTask?.cancel()
+        let query = marketSearchText
+        let sort = marketSort
+        marketSearchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled else { return }
+            store.loadSkillsMarket(query: query, sort: sort)
+        }
+    }
+
+    private func triggerMarketSearch(immediate: Bool) {
+        marketSearchTask?.cancel()
+        if immediate {
+            store.loadSkillsMarket(query: marketSearchText, sort: marketSort)
+            return
+        }
+        scheduleMarketSearch()
     }
 }
 

@@ -45,6 +45,23 @@ final class NativeAppStoreConfigCenterTests: XCTestCase {
         XCTAssertEqual(requests.first?.silent, true)
     }
 
+    func testLoadSkillsMarketForwardsQueryAndSort() {
+        let store = NativeAppStore()
+        let recorder = SkillsMarketLoadRecorder()
+
+        store.configure(actions: NativeAppActions(
+            loadSkillsMarket: { query, sort in
+                recorder.record(query: query, sort: sort)
+            }
+        ))
+
+        store.loadSkillsMarket(query: "notion", sort: .downloads)
+
+        let event = recorder.snapshot()
+        XCTAssertEqual(event?.query, "notion")
+        XCTAssertEqual(event?.sort, .downloads)
+    }
+
     func testSelectingProfileWhileFocusedOnProfilesRefreshesConfigCenter() {
         let store = NativeAppStore()
         let recorder = RefreshRequestRecorder()
@@ -561,7 +578,7 @@ final class NativeAppStoreConfigCenterTests: XCTestCase {
 
         let marketSummary = OpenClawSkillsMarketSummary(
             collectedAt: "2026-03-13T00:00:00Z",
-            sourceRepo: "https://github.com/VoltAgent/awesome-openclaw-skills",
+            sourceRepo: "https://clawhub.ai/api/v1/skills",
             managedDirectory: "/tmp/manager/skills-market",
             totalItems: 1,
             categories: [.init(id: "git-and-github", title: "Git & GitHub", count: 1)],
@@ -570,10 +587,16 @@ final class NativeAppStoreConfigCenterTests: XCTestCase {
                     slug: "demo-skill",
                     name: "Demo Skill",
                     summary: "desc",
+                    summaryZh: "用于演示的技能。",
                     owner: "demo-owner",
                     githubUrl: "https://github.com/openclaw/skills/tree/main/skills/demo-owner/demo-skill",
                     registryUrl: "https://clawhub.ai/demo-skill",
-                    categoryIds: ["git-and-github"]
+                    categoryIds: ["git-and-github"],
+                    tags: ["git"],
+                    downloads: 10,
+                    stars: 2,
+                    installsCurrent: 1,
+                    updatedAt: "2026-03-13T00:00:00Z"
                 )
             ]
         )
@@ -622,6 +645,23 @@ final class NativeAppStoreConfigCenterTests: XCTestCase {
         XCTAssertEqual(store.skillsMarketSummary?.totalItems, 1)
         XCTAssertEqual(store.skillsInventory?.managerInstalled, 1)
         XCTAssertEqual(store.openClawSkillsConfig?.extraDirs, ["/tmp/manager/skills-market"])
+    }
+}
+
+private final class SkillsMarketLoadRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: (query: String, sort: SkillsMarketSort)?
+
+    func record(query: String, sort: SkillsMarketSort) {
+        lock.lock()
+        latest = (query, sort)
+        lock.unlock()
+    }
+
+    func snapshot() -> (query: String, sort: SkillsMarketSort)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return latest
     }
 }
 

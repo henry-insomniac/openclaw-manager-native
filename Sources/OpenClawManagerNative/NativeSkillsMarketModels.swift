@@ -1,5 +1,27 @@
 @preconcurrency import Foundation
 
+enum SkillsMarketSort: String, CaseIterable, Identifiable, Codable, Sendable {
+    case downloads
+    case updated
+    case stars
+    case installsCurrent
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .downloads:
+            return "下载量"
+        case .updated:
+            return "最近更新"
+        case .stars:
+            return "Stars"
+        case .installsCurrent:
+            return "当前安装"
+        }
+    }
+}
+
 struct OpenClawSkillsMarketSummary: Decodable, Equatable, Sendable {
     struct Category: Decodable, Equatable, Identifiable, Sendable {
         var id: String
@@ -11,12 +33,26 @@ struct OpenClawSkillsMarketSummary: Decodable, Equatable, Sendable {
         var slug: String
         var name: String
         var summary: String
-        var owner: String
-        var githubUrl: String
+        var summaryZh: String?
+        var owner: String?
+        var githubUrl: String?
         var registryUrl: String
         var categoryIds: [String]
+        var tags: [String]
+        var downloads: Int?
+        var stars: Int?
+        var installsCurrent: Int?
+        var updatedAt: String?
 
         var id: String { slug }
+
+        var preferredSummary: String {
+            let localized = summaryZh?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !localized.isEmpty {
+                return localized
+            }
+            return summary
+        }
     }
 
     var collectedAt: String

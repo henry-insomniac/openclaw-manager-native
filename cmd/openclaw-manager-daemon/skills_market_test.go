@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -50,6 +51,291 @@ func TestParseAwesomeCategoryMarkdownExtractsSkills(t *testing.T) {
 	}
 	if items[1].Slug != "second-skill" || items[1].Owner != "another" {
 		t.Fatalf("unexpected second item: %+v", items[1])
+	}
+}
+
+func TestBuildOpenClawSkillsMarketSummaryUsesClawHubBrowseByDefault(t *testing.T) {
+	listHits := 0
+	readmeHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/skills":
+			listHits++
+			if got := r.URL.Query().Get("sort"); got != "downloads" {
+				t.Fatalf("expected downloads sort, got %q", got)
+			}
+			if got := r.URL.Query().Get("limit"); got != "100" {
+				t.Fatalf("expected limit=100, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("cursor") == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"items": []map[string]any{
+						{
+							"slug":        "notion",
+							"displayName": "Notion",
+							"summary":     "Notion API for creating and managing pages, databases, and blocks.",
+							"tags":        map[string]any{"latest": "1.0.0"},
+							"stats": map[string]any{
+								"downloads":       320,
+								"installsAllTime": 120,
+								"stars":           40,
+							},
+							"updatedAt": int64(1_773_122_478_761),
+							"latestVersion": map[string]any{
+								"version": "1.0.0",
+							},
+						},
+						{
+							"slug":        "github",
+							"displayName": "GitHub",
+							"summary":     "Manage repositories, issues, and pull requests via GitHub API.",
+							"tags":        map[string]any{"latest": "2.0.0"},
+							"stats": map[string]any{
+								"downloads":       200,
+								"installsAllTime": 90,
+								"stars":           55,
+							},
+							"updatedAt": int64(1_773_120_000_000),
+							"latestVersion": map[string]any{
+								"version": "2.0.0",
+							},
+						},
+					},
+					"nextCursor": "page-2",
+				})
+				return
+			}
+			if got := r.URL.Query().Get("cursor"); got != "page-2" {
+				t.Fatalf("unexpected cursor: %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"slug":        "weather",
+						"displayName": "Weather",
+						"summary":     "Search weather forecasts for cities and regions.",
+						"tags":        map[string]any{"latest": "0.9.0"},
+						"stats": map[string]any{
+							"downloads":       180,
+							"installsAllTime": 75,
+							"stars":           25,
+						},
+						"updatedAt": int64(1_773_110_000_000),
+						"latestVersion": map[string]any{
+							"version": "0.9.0",
+						},
+					},
+				},
+			})
+		case "/README.md":
+			readmeHits++
+			http.Error(w, "awesome should not be used", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENCLAW_CLAWHUB_API_BASE_URL", server.URL+"/api/v1")
+	t.Setenv("OPENCLAW_CLAWHUB_WEB_BASE_URL", server.URL)
+	t.Setenv("OPENCLAW_SKILLS_MARKET_RAW_BASE_URL", server.URL)
+
+	app := &App{managerDir: t.TempDir()}
+	summary, err := app.buildOpenClawSkillsMarketSummary(false, "", "")
+	if err != nil {
+		t.Fatalf("buildOpenClawSkillsMarketSummary: %v", err)
+	}
+	if listHits != 2 {
+		t.Fatalf("expected 2 list requests, got %d", listHits)
+	}
+	if readmeHits != 0 {
+		t.Fatalf("expected no awesome fallback, got %d README hits", readmeHits)
+	}
+	if summary.IsSearchResult {
+		t.Fatalf("expected browse summary, got search result")
+	}
+	if summary.Sort != "downloads" {
+		t.Fatalf("expected downloads sort, got %q", summary.Sort)
+	}
+	if summary.SourceRepo != server.URL+"/api/v1/skills?limit=100&sort=downloads" {
+		t.Fatalf("unexpected source repo: %s", summary.SourceRepo)
+	}
+	if summary.TotalItems != 3 || len(summary.Items) != 3 {
+		t.Fatalf("expected 3 items, got total=%d len=%d", summary.TotalItems, len(summary.Items))
+	}
+	if summary.Items[0].Slug != "notion" {
+		t.Fatalf("expected notion to remain first by downloads, got %s", summary.Items[0].Slug)
+	}
+	if got := summary.Items[0].SummaryZh; !strings.Contains(got, "数据库") || !strings.Contains(got, "Notion API") {
+		t.Fatalf("expected localized summary for notion, got %q", got)
+	}
+	if len(summary.Categories) == 0 {
+		t.Fatalf("expected inferred categories for browse summary")
+	}
+}
+
+func TestBuildOpenClawSkillsMarketSummaryUsesClawHubSearchForQuery(t *testing.T) {
+	searchHits := 0
+	listHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/search":
+			searchHits++
+			if got := r.URL.Query().Get("q"); got != "notion" {
+				t.Fatalf("expected q=notion, got %q", got)
+			}
+			if got := r.URL.Query().Get("limit"); got != "40" {
+				t.Fatalf("expected limit=40, got %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []map[string]any{
+					{
+						"slug":        "notion",
+						"displayName": "Notion",
+						"summary":     "Notion API for creating and managing pages, databases, and blocks.",
+						"version":     "1.4.0",
+						"updatedAt":   int64(1_773_122_478_761),
+					},
+				},
+			})
+		case "/api/v1/skills":
+			listHits++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENCLAW_CLAWHUB_API_BASE_URL", server.URL+"/api/v1")
+	t.Setenv("OPENCLAW_CLAWHUB_WEB_BASE_URL", server.URL)
+
+	app := &App{managerDir: t.TempDir()}
+	summary, err := app.buildOpenClawSkillsMarketSummary(false, "notion", "")
+	if err != nil {
+		t.Fatalf("buildOpenClawSkillsMarketSummary search: %v", err)
+	}
+	if searchHits != 1 {
+		t.Fatalf("expected 1 search hit, got %d", searchHits)
+	}
+	if listHits != 1 {
+		t.Fatalf("expected 1 browse hit for local merge, got %d", listHits)
+	}
+	if !summary.IsSearchResult {
+		t.Fatalf("expected search summary")
+	}
+	if summary.Query != "notion" {
+		t.Fatalf("unexpected query echo: %q", summary.Query)
+	}
+	if summary.Sort != "relevance" {
+		t.Fatalf("expected relevance sort for search, got %q", summary.Sort)
+	}
+	if summary.SourceRepo != server.URL+"/api/v1/search?limit=40&q=notion" {
+		t.Fatalf("unexpected search source: %s", summary.SourceRepo)
+	}
+	if len(summary.Items) != 1 || summary.Items[0].Slug != "notion" {
+		t.Fatalf("unexpected search items: %+v", summary.Items)
+	}
+	if got := summary.Items[0].SummaryZh; !strings.Contains(got, "数据库") {
+		t.Fatalf("expected localized summary in search result, got %q", got)
+	}
+}
+
+func TestBuildOpenClawSkillsMarketSummaryFallsBackToLocalChineseSearch(t *testing.T) {
+	searchHits := 0
+	listHits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/search":
+			searchHits++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]any{}})
+		case "/api/v1/skills":
+			listHits++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{
+						"slug":        "notion",
+						"displayName": "Notion",
+						"summary":     "Notion API for creating and managing pages, databases, and blocks.",
+						"tags":        map[string]any{"latest": "1.0.0"},
+						"stats": map[string]any{
+							"downloads":       320,
+							"installsAllTime": 120,
+							"stars":           40,
+						},
+						"updatedAt": int64(1_773_122_478_761),
+						"latestVersion": map[string]any{
+							"version": "1.0.0",
+						},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENCLAW_CLAWHUB_API_BASE_URL", server.URL+"/api/v1")
+	t.Setenv("OPENCLAW_CLAWHUB_WEB_BASE_URL", server.URL)
+
+	app := &App{managerDir: t.TempDir()}
+	summary, err := app.buildOpenClawSkillsMarketSummary(false, "数据库", "")
+	if err != nil {
+		t.Fatalf("buildOpenClawSkillsMarketSummary chinese query: %v", err)
+	}
+	if searchHits != 1 || listHits != 1 {
+		t.Fatalf("expected search+browse fallback once, got search=%d list=%d", searchHits, listHits)
+	}
+	if len(summary.Items) != 1 || summary.Items[0].Slug != "notion" {
+		t.Fatalf("expected localized fallback to return notion, got %+v", summary.Items)
+	}
+	if got := summary.Items[0].SummaryZh; !strings.Contains(got, "数据库") {
+		t.Fatalf("expected chinese summary to drive local match, got %q", got)
+	}
+}
+
+func TestLocalizeSkillSummaryPatterns(t *testing.T) {
+	cases := []struct {
+		name    string
+		summary string
+		wants   []string
+	}{
+		{
+			name:    "Notion",
+			summary: "Notion API for creating and managing pages, databases, and blocks.",
+			wants:   []string{"Notion API", "页面", "数据库"},
+		},
+		{
+			name:    "Find Skills",
+			summary: "Helps users discover and install agent skills when they ask questions like \"how do I do X\".",
+			wants:   []string{"发现并安装可用技能"},
+		},
+		{
+			name:    "self-improving-agent",
+			summary: "Captures learnings, errors, and corrections to enable continuous improvement.",
+			wants:   []string{"经验", "持续改进"},
+		},
+	}
+
+	for _, tc := range cases {
+		got := localizeSkillSummary(tc.name, tc.summary, nil)
+		if got == "" {
+			t.Fatalf("expected localized summary for %s", tc.name)
+		}
+		if got == tc.summary {
+			t.Fatalf("expected localized summary to differ from english for %s", tc.name)
+		}
+		for _, want := range tc.wants {
+			if !strings.Contains(got, want) {
+				t.Fatalf("expected %q to contain %q, got %q", tc.name, want, got)
+			}
+		}
 	}
 }
 

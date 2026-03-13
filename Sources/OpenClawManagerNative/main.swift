@@ -41,6 +41,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private var latestOpenClawSkillsConfig: OpenClawSkillsConfigSummary?
     private var latestSkillsMarketSummary: OpenClawSkillsMarketSummary?
     private var latestSkillsInventory: OpenClawSkillsInventory?
+    private var currentSkillsMarketQuery = ""
+    private var currentSkillsMarketSort: SkillsMarketSort = .downloads
     private var lastMenuBarError: String?
     private var isRestarting = false
 
@@ -215,6 +217,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             supportRepair: { [weak self] action in
                 Task { @MainActor [weak self] in
                     self?.runSupportRepair(action)
+                }
+            },
+            loadSkillsMarket: { [weak self] query, sort in
+                Task { @MainActor [weak self] in
+                    self?.loadSkillsMarket(query: query, sort: sort)
                 }
             },
             loadSkillMarketDetail: { [weak self] slug in
@@ -703,7 +710,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                 let includeSkills = scope == .skillsOnly
                 let supportPath = !silentForStore ? "/api/support/summary?fresh=1" : "/api/support/summary"
                 let skillsPath = !silentForStore ? "/api/openclaw/skills?fresh=1" : "/api/openclaw/skills"
-                let skillsMarketPath = !silentForStore ? "/api/openclaw/skills/market?fresh=1" : "/api/openclaw/skills/market"
+                let skillsMarketPath = self.skillsMarketPath(fresh: !silentForStore)
                 let skillsInventoryPath = !silentForStore ? "/api/openclaw/skills/inventory?fresh=1" : "/api/openclaw/skills/inventory"
                 let group = DispatchGroup()
 
@@ -1317,6 +1324,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
+    private func loadSkillsMarket(query: String, sort: SkillsMarketSort) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        currentSkillsMarketQuery = trimmed
+        currentSkillsMarketSort = sort
+
+        performBackgroundUIRequest(key: "skills:market:load", errorTitle: "读取技能市场失败", request: {
+            try self.performManagerRequest(
+                path: self.skillsMarketPath(fresh: true, query: trimmed, sort: sort)
+            ) as OpenClawSkillsMarketSummary
+        }, onSuccess: { summary in
+            self.latestSkillsMarketSummary = summary
+            self.store.applySkillsMarketSummary(summary)
+        })
+    }
+
+    @MainActor
     private func installSkill(_ slug: String) {
         let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -1504,6 +1527,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q").target = NSApp
 
+        let editItem = NSMenuItem()
+        menu.addItem(editItem)
+
+        let editMenu = NSMenu(title: "编辑")
+        editItem.submenu = editMenu
+        let undoItem = editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        undoItem.target = nil
+        let redoItem = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        redoItem.target = nil
+        editMenu.addItem(.separator())
+        let cutItem = editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        cutItem.target = nil
+        let copyItem = editMenu.addItem(withTitle: "复制", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        copyItem.target = nil
+        let pasteItem = editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        pasteItem.target = nil
+        let selectAllItem = editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        selectAllItem.target = nil
+
         let configItem = NSMenuItem()
         menu.addItem(configItem)
 
@@ -1594,6 +1637,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
         NSApp.mainMenu = menu
         rebuildStatusItemMenu()
+    }
+
+    private func skillsMarketPath(
+        fresh: Bool,
+        query: String? = nil,
+        sort: SkillsMarketSort? = nil
+    ) -> String {
+        var components = URLComponents()
+        components.path = "/api/openclaw/skills/market"
+        var queryItems: [URLQueryItem] = []
+        if fresh {
+            queryItems.append(URLQueryItem(name: "fresh", value: "1"))
+        }
+        let trimmedQuery = (query ?? currentSkillsMarketQuery).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty {
+            queryItems.append(URLQueryItem(name: "q", value: trimmedQuery))
+        }
+        queryItems.append(URLQueryItem(name: "sort", value: (sort ?? currentSkillsMarketSort).rawValue))
+        components.queryItems = queryItems
+        return components.string ?? "/api/openclaw/skills/market"
     }
 
     private func shortPath(_ raw: String) -> String {

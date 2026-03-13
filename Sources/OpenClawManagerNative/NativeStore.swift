@@ -784,6 +784,7 @@ struct NativeAppActions: Sendable {
     var openManagerStateDirectory: @Sendable () -> Void = {}
     var restartServices: @Sendable () -> Void = {}
     var supportRepair: @Sendable (SupportRepairAction) -> Void = { _ in }
+    var loadSkillsMarket: @Sendable (String, SkillsMarketSort) -> Void = { _, _ in }
     var loadSkillMarketDetail: @Sendable (String) -> Void = { _ in }
     var installSkill: @Sendable (String) -> Void = { _ in }
     var uninstallSkill: @Sendable (String) -> Void = { _ in }
@@ -1011,6 +1012,11 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         isLoading = false
     }
 
+    func applySkillsMarketSummary(_ summary: OpenClawSkillsMarketSummary) {
+        skillsMarketSummary = summary
+        isLoading = false
+    }
+
     func applySkillMarketDetail(_ detail: OpenClawSkillMarketDetail) {
         skillMarketDetail = detail
         isLoading = false
@@ -1121,6 +1127,10 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
 
     func openActivityMonitor() {
         actions.openActivityMonitor()
+    }
+
+    func loadSkillsMarket(query: String, sort: SkillsMarketSort) {
+        actions.loadSkillsMarket(query, sort)
     }
 
     func loadSkillMarketDetail(slug: String) {
