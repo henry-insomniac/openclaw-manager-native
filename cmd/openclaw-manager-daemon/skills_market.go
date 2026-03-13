@@ -1243,30 +1243,83 @@ func newerMarketTimestamp(candidate, existing *string) bool {
 	return strings.TrimSpace(*candidate) > strings.TrimSpace(*existing)
 }
 
+func cloneMarketItem(item OpenClawSkillMarketItem) OpenClawSkillMarketItem {
+	cloned := item
+	cloned.CategoryIDs = append([]string(nil), item.CategoryIDs...)
+	cloned.Tags = append([]string(nil), item.Tags...)
+	return cloned
+}
+
+func (app *App) cachedSkillsMarketItem(slug string) *OpenClawSkillMarketItem {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	if app.skillsMarketCache == nil {
+		return nil
+	}
+	item := findMarketItemBySlug(app.skillsMarketCache.Summary.Items, slug)
+	if item == nil {
+		return nil
+	}
+	cloned := cloneMarketItem(*item)
+	return &cloned
+}
+
+func fallbackOpenClawSkillMarketDetail(item OpenClawSkillMarketItem) OpenClawSkillMarketDetail {
+	detail := OpenClawSkillMarketDetail{
+		CollectedAt: nowISO(),
+		Item:        cloneMarketItem(item),
+		UpdatedAt:   item.UpdatedAt,
+		Stats: OpenClawSkillRegistryStats{
+			Downloads:       item.Downloads,
+			InstallsCurrent: item.InstallsCurrent,
+			Stars:           item.Stars,
+		},
+		Metadata: OpenClawSkillRegistryMetadata{
+			OS:      []string{},
+			Systems: []string{},
+		},
+	}
+	if version := nullableString(item.LatestVersion); version != nil {
+		detail.LatestVersion = &OpenClawSkillLatestVersion{Version: version}
+	}
+	if owner := nullableString(item.Owner); owner != nil {
+		detail.Owner = &OpenClawSkillRegistryOwner{DisplayName: owner}
+	}
+	return detail
+}
+
 func (app *App) fetchOpenClawSkillMarketDetail(rawSlug string, fresh bool) (OpenClawSkillMarketDetail, error) {
 	slug, err := normalizeMarketSkillSlug(rawSlug)
 	if err != nil {
 		return OpenClawSkillMarketDetail{}, err
 	}
 
+	var staleDetail *OpenClawSkillMarketDetail
 	if !fresh {
 		app.mu.Lock()
-		if cached, ok := app.skillsMarketDetailCache[slug]; ok && time.Since(cached.FetchedAt) <= skillsMarketDetailTTL {
+		if cached, ok := app.skillsMarketDetailCache[slug]; ok {
+			if time.Since(cached.FetchedAt) <= skillsMarketDetailTTL {
+				detail := cached.Detail
+				app.mu.Unlock()
+				return detail, nil
+			}
 			detail := cached.Detail
-			app.mu.Unlock()
-			return detail, nil
+			staleDetail = &detail
 		}
 		app.mu.Unlock()
 	}
 
-	marketSummary, marketErr := app.buildDefaultOpenClawSkillsMarketSummary(false, normalizeSkillsMarketSort(""))
-	var item *OpenClawSkillMarketItem
-	if marketErr == nil {
-		item = findMarketItemBySlug(marketSummary.Items, slug)
-	}
+	item := app.cachedSkillsMarketItem(slug)
 
 	var payload clawHubSkillDetailPayload
 	if err := fetchJSONWithTimeout(clawHubSkillDetailURL(slug), httpTimeout, &payload); err != nil {
+		if staleDetail != nil {
+			return *staleDetail, nil
+		}
+		if item != nil {
+			return fallbackOpenClawSkillMarketDetail(*item), nil
+		}
 		return OpenClawSkillMarketDetail{}, fmt.Errorf("读取 ClawHub skill 详情失败: %w", err)
 	}
 

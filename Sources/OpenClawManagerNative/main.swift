@@ -1314,10 +1314,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private func loadSkillMarketDetail(_ slug: String) {
         let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let busyKey = "skill:detail:\(trimmed)"
+        guard !store.isBusy(busyKey) else { return }
 
-        performBackgroundUIRequest(key: "skill:detail:\(trimmed)", errorTitle: "读取技能详情失败", request: {
+        performBackgroundUIRequest(key: busyKey, errorTitle: "读取技能详情失败", request: {
             let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
-            return try self.performManagerRequest(path: "/api/openclaw/skills/market/\(encoded)") as OpenClawSkillMarketDetail
+            return try self.performManagerRequest(
+                path: "/api/openclaw/skills/market/\(encoded)",
+                timeout: 20
+            ) as OpenClawSkillMarketDetail
         }, onSuccess: { detail in
             self.store.applySkillMarketDetail(detail)
         })

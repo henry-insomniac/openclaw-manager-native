@@ -339,6 +339,148 @@ func TestLocalizeSkillSummaryPatterns(t *testing.T) {
 	}
 }
 
+func TestFetchOpenClawSkillMarketDetailAvoidsBrowseFetch(t *testing.T) {
+	var browseCalls int
+	var detailCalls int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/skills":
+			browseCalls++
+			http.Error(w, "unexpected browse request", http.StatusInternalServerError)
+		case "/api/v1/skills/demo-skill":
+			detailCalls++
+			payload := map[string]any{
+				"skill": map[string]any{
+					"slug":        "demo-skill",
+					"displayName": "Demo Skill",
+					"summary":     "Demo summary.",
+					"stats": map[string]any{
+						"comments":        1,
+						"downloads":       12,
+						"installsAllTime": 20,
+						"installsCurrent": 3,
+						"stars":           7,
+						"versions":        2,
+					},
+					"createdAt": int64(1_773_300_000_000),
+					"updatedAt": int64(1_773_300_100_000),
+				},
+				"latestVersion": map[string]any{
+					"version":   "1.2.3",
+					"createdAt": int64(1_773_300_100_000),
+					"changelog": "Initial release",
+					"license":   "MIT",
+				},
+				"metadata": map[string]any{
+					"os":      []string{"darwin"},
+					"systems": []string{"git"},
+				},
+				"owner": map[string]any{
+					"handle":      "demo-owner",
+					"displayName": "Demo Owner",
+					"image":       "https://example.com/avatar.png",
+				},
+				"moderation": map[string]any{
+					"verdict":          "clean",
+					"isSuspicious":     false,
+					"isMalwareBlocked": false,
+					"reasonCodes":      []string{},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENCLAW_CLAWHUB_API_BASE_URL", server.URL+"/api/v1")
+	t.Setenv("OPENCLAW_CLAWHUB_WEB_BASE_URL", server.URL)
+
+	app := &App{
+		skillsMarketDetailCache: map[string]cachedOpenClawSkillMarketDetail{},
+	}
+
+	detail, err := app.fetchOpenClawSkillMarketDetail("demo-skill", false)
+	if err != nil {
+		t.Fatalf("fetchOpenClawSkillMarketDetail: %v", err)
+	}
+	if browseCalls != 0 {
+		t.Fatalf("expected no browse fetch, got %d", browseCalls)
+	}
+	if detailCalls != 1 {
+		t.Fatalf("expected one detail fetch, got %d", detailCalls)
+	}
+	if detail.Item.Slug != "demo-skill" {
+		t.Fatalf("expected slug demo-skill, got %q", detail.Item.Slug)
+	}
+	if detail.Stats.Downloads != 12 || detail.Stats.Stars != 7 {
+		t.Fatalf("unexpected detail stats: %+v", detail.Stats)
+	}
+}
+
+func TestFetchOpenClawSkillMarketDetailFallsBackToCachedMarketItem(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/skills/demo-skill" {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENCLAW_CLAWHUB_API_BASE_URL", server.URL+"/api/v1")
+	t.Setenv("OPENCLAW_CLAWHUB_WEB_BASE_URL", server.URL)
+
+	updatedAt := "2026-03-13T10:00:00Z"
+	app := &App{
+		skillsMarketCache: &cachedOpenClawSkillsMarketSummary{
+			Summary: OpenClawSkillsMarketSummary{
+				Items: []OpenClawSkillMarketItem{
+					{
+						Slug:            "demo-skill",
+						Name:            "Demo Skill",
+						Summary:         "Demo summary.",
+						SummaryZh:       "用于演示的技能。",
+						Owner:           "Demo Owner",
+						RegistryURL:     registryURLForSlug("demo-skill"),
+						CategoryIDs:     []string{"git-and-github"},
+						Tags:            []string{"Git & GitHub"},
+						Downloads:       12,
+						InstallsCurrent: 3,
+						Stars:           7,
+						LatestVersion:   "1.2.3",
+						UpdatedAt:       &updatedAt,
+					},
+				},
+			},
+			FetchedAt: time.Now(),
+			Query:     "",
+			Sort:      "downloads",
+		},
+		skillsMarketDetailCache: map[string]cachedOpenClawSkillMarketDetail{},
+	}
+
+	detail, err := app.fetchOpenClawSkillMarketDetail("demo-skill", false)
+	if err != nil {
+		t.Fatalf("fetchOpenClawSkillMarketDetail fallback: %v", err)
+	}
+	if detail.Item.SummaryZh != "用于演示的技能。" {
+		t.Fatalf("expected localized summary fallback, got %q", detail.Item.SummaryZh)
+	}
+	if detail.Stats.Downloads != 12 || detail.Stats.Stars != 7 || detail.Stats.InstallsCurrent != 3 {
+		t.Fatalf("unexpected fallback stats: %+v", detail.Stats)
+	}
+	if detail.LatestVersion == nil || derefString(detail.LatestVersion.Version) != "1.2.3" {
+		t.Fatalf("expected fallback latest version, got %+v", detail.LatestVersion)
+	}
+	if detail.Owner == nil || derefString(detail.Owner.DisplayName) != "Demo Owner" {
+		t.Fatalf("expected fallback owner, got %+v", detail.Owner)
+	}
+}
+
 func TestInstallAndUninstallOpenClawSkill(t *testing.T) {
 	zipBuffer := bytes.NewBuffer(nil)
 	zipWriter := zip.NewWriter(zipBuffer)

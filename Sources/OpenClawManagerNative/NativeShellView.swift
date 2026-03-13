@@ -2971,6 +2971,7 @@ private struct SkillsSection: View {
     @State private var showDetailChangelog = false
     @State private var showDetailOriginalSummary = false
     @State private var expandedInventoryGroups: Set<String> = ["manager-installed", "personal"]
+    @State private var marketDisplayLimit = 96
     @State private var marketSearchTask: Task<Void, Never>?
 
     private var categoryLookup: [String: String] {
@@ -2993,15 +2994,31 @@ private struct SkillsSection: View {
         }
     }
 
+    private var baseMarketDisplayLimit: Int {
+        (!isMarketSearching && selectedCategoryID.isEmpty) ? 96 : 180
+    }
+
+    private var effectiveMarketDisplayLimit: Int {
+        max(baseMarketDisplayLimit, marketDisplayLimit)
+    }
+
+    private var marketDisplayStep: Int {
+        (!isMarketSearching && selectedCategoryID.isEmpty) ? 48 : 60
+    }
+
     private var displayedMarketItems: [OpenClawSkillsMarketSummary.Item] {
         let items = filteredMarketItems
-        let limit = (!isMarketSearching && selectedCategoryID.isEmpty) ? 96 : 180
+        let limit = effectiveMarketDisplayLimit
         guard items.count > limit else { return items }
         return Array(items.prefix(limit))
     }
 
     private var isClippingMarketItems: Bool {
         filteredMarketItems.count > displayedMarketItems.count
+    }
+
+    private var remainingMarketItemCount: Int {
+        max(0, filteredMarketItems.count - displayedMarketItems.count)
     }
 
     private var filteredInventoryItems: [OpenClawSkillsInventory.Item] {
@@ -3077,6 +3094,13 @@ private struct SkillsSection: View {
 
             skillsWorkbenchCard
             activeWorkspaceContent
+        }
+        .onAppear {
+            resetMarketDisplayLimit()
+            syncMarketSelection()
+        }
+        .onChange(of: store.skillsMarketSummary?.collectedAt) { _ in
+            syncMarketSelection()
         }
     }
 
@@ -3189,6 +3213,8 @@ private struct SkillsSection: View {
             withAnimation(.easeOut(duration: 0.18)) {
                 selectedCategoryID = id
             }
+            resetMarketDisplayLimit()
+            syncMarketSelection()
         } label: {
             Text(title)
                 .font(.system(size: 13, weight: .semibold))
@@ -3218,6 +3244,7 @@ private struct SkillsSection: View {
                         }
                         .onChange(of: marketSearchText) { _ in
                             selectedCategoryID = ""
+                            resetMarketDisplayLimit()
                             scheduleMarketSearch()
                         }
                     Picker("排序", selection: $marketSort) {
@@ -3229,12 +3256,14 @@ private struct SkillsSection: View {
                     .frame(width: 120)
                     .onChange(of: marketSort) { _ in
                         selectedCategoryID = ""
+                        resetMarketDisplayLimit()
                         triggerMarketSearch(immediate: true)
                     }
                     if isMarketSearching {
                         Button("清空") {
                             marketSearchText = ""
                             selectedCategoryID = ""
+                            resetMarketDisplayLimit()
                             triggerMarketSearch(immediate: true)
                         }
                         .buttonStyle(NativeSecondaryButtonStyle())
@@ -3265,7 +3294,7 @@ private struct SkillsSection: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text(isClippingMarketItems
-                        ? "当前先渲染前 \(displayedMarketItems.count) 项，继续筛选会更快"
+                        ? "当前先显示 \(displayedMarketItems.count) / \(filteredMarketItems.count) 项，可继续展开"
                         : "支持粘贴后直接回车搜索")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -3328,9 +3357,23 @@ private struct SkillsSection: View {
                         .foregroundStyle(.secondary)
 
                     if isClippingMarketItems {
-                        Text("为保证输入流畅，默认只渲染前 \(displayedMarketItems.count) 项。继续搜索或按分类筛选可以更快定位。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("为保证输入流畅，结果会先分批显示。继续筛选，或者直接展开更多结果。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            AdaptiveLine(spacing: 10) {
+                                Button("再显示 \(min(marketDisplayStep, remainingMarketItemCount)) 项") {
+                                    showMoreMarketItems()
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+
+                                Button("显示全部 \(filteredMarketItems.count) 项") {
+                                    showAllMarketItems()
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+                            }
+                        }
                     }
                 } else {
                     Text("等待技能市场摘要。")
@@ -3343,12 +3386,8 @@ private struct SkillsSection: View {
     private func marketRow(_ item: OpenClawSkillsMarketSummary.Item, selected: Bool) -> some View {
         let installed = inventoryLookup[item.slug]
         return Button {
-            selectedSkillSlug = item.slug
             activeWorkspace = .market
-            showDetailRequirements = false
-            showDetailChangelog = false
-            showDetailOriginalSummary = false
-            store.loadSkillMarketDetail(slug: item.slug)
+            focusMarketSkill(item.slug)
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -3741,10 +3780,7 @@ private struct SkillsSection: View {
                 } else if marketLookup[item.slug] != nil {
                     Button("查看市场详情") {
                         activeWorkspace = .market
-                        selectedSkillSlug = item.slug
-                        showDetailRequirements = false
-                        showDetailChangelog = false
-                        store.loadSkillMarketDetail(slug: item.slug)
+                        focusMarketSkill(item.slug)
                     }
                     .buttonStyle(NativeSecondaryButtonStyle())
                 }
@@ -3783,6 +3819,59 @@ private struct SkillsSection: View {
             return
         }
         scheduleMarketSearch()
+    }
+
+    private func resetMarketDisplayLimit() {
+        marketDisplayLimit = baseMarketDisplayLimit
+    }
+
+    private func showMoreMarketItems() {
+        marketDisplayLimit = min(filteredMarketItems.count, effectiveMarketDisplayLimit + marketDisplayStep)
+    }
+
+    private func showAllMarketItems() {
+        marketDisplayLimit = filteredMarketItems.count
+    }
+
+    private func resetMarketDetailDisclosure() {
+        showDetailRequirements = false
+        showDetailChangelog = false
+        showDetailOriginalSummary = false
+    }
+
+    private func focusMarketSkill(_ slug: String) {
+        selectedSkillSlug = slug
+        resetMarketDetailDisclosure()
+
+        if let index = filteredMarketItems.firstIndex(where: { $0.slug == slug }), index >= effectiveMarketDisplayLimit {
+            marketDisplayLimit = index + 1
+        }
+
+        if store.skillMarketDetail?.item.slug != slug {
+            store.loadSkillMarketDetail(slug: slug)
+        }
+    }
+
+    private func syncMarketSelection() {
+        let items = filteredMarketItems
+        guard !items.isEmpty else {
+            selectedSkillSlug = nil
+            return
+        }
+
+        if let selectedSkillSlug, let index = items.firstIndex(where: { $0.slug == selectedSkillSlug }) {
+            if index >= effectiveMarketDisplayLimit {
+                marketDisplayLimit = index + 1
+            }
+            if store.skillMarketDetail?.item.slug != selectedSkillSlug {
+                store.loadSkillMarketDetail(slug: selectedSkillSlug)
+            }
+            return
+        }
+
+        if let first = items.first {
+            focusMarketSkill(first.slug)
+        }
     }
 }
 
