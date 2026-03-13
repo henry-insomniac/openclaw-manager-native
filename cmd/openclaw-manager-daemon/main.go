@@ -2370,6 +2370,14 @@ func (app *App) readOpenClawSkillsConfigSummary() (OpenClawSkillsConfigSummary, 
 }
 
 func (app *App) buildOpenClawSkillsSummary(fresh bool) (OpenClawSkillsSummary, error) {
+	repaired, err := app.ensureManagerSkillsMountConfigured()
+	if err != nil {
+		return OpenClawSkillsSummary{}, err
+	}
+	if repaired {
+		fresh = true
+	}
+
 	if !fresh {
 		app.mu.Lock()
 		if app.skillsSummaryCache != nil && time.Since(app.skillsSummaryCache.FetchedAt) <= skillsSummaryCacheTTL {
@@ -3328,7 +3336,7 @@ func (app *App) syncProfileToDefault(profileName string) error {
 	if err != nil {
 		return err
 	}
-	if err := app.copyFileIfDifferent(sourceConfigPath, defaultConfigPath, "default-openclaw-config"); err != nil {
+	if err := app.copyConfigToDefaultPreservingGlobalSections(sourceConfigPath, defaultConfigPath, "default-openclaw-config", []string{"skills"}); err != nil {
 		return err
 	}
 
@@ -3398,6 +3406,80 @@ func (app *App) backupFile(sourcePath, label string) error {
 	stamp := strings.ReplaceAll(time.Now().UTC().Format("20060102T150405"), ":", "")
 	destination := filepath.Join(app.backupDir, fmt.Sprintf("%s.%s.json", label, stamp))
 	return copyFile(sourcePath, destination)
+}
+
+func (app *App) copyConfigToDefaultPreservingGlobalSections(sourcePath, targetPath, backupLabel string, preserveKeys []string) error {
+	if !pathExists(sourcePath) {
+		return nil
+	}
+
+	sourceBuffer, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+
+	var targetBuffer []byte
+	if pathExists(targetPath) {
+		targetBuffer, err = os.ReadFile(targetPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	mergedBuffer, changed, err := mergeJSONDocumentsPreservingTopLevelKeys(sourceBuffer, targetBuffer, preserveKeys)
+	if err != nil {
+		return app.copyFileIfDifferent(sourcePath, targetPath, backupLabel)
+	}
+	if !changed {
+		return nil
+	}
+	if backupLabel != "" && pathExists(targetPath) {
+		if err := app.backupFile(targetPath, backupLabel); err != nil {
+			return err
+		}
+	}
+	if err := ensureDir(filepath.Dir(targetPath)); err != nil {
+		return err
+	}
+	return os.WriteFile(targetPath, mergedBuffer, 0o600)
+}
+
+func mergeJSONDocumentsPreservingTopLevelKeys(sourceBuffer, targetBuffer []byte, preserveKeys []string) ([]byte, bool, error) {
+	sourceRoot, err := decodeJSONObjectOrEmpty(sourceBuffer)
+	if err != nil {
+		return nil, false, err
+	}
+	targetRoot, err := decodeJSONObjectOrEmpty(targetBuffer)
+	if err != nil {
+		return nil, false, err
+	}
+
+	for _, key := range preserveKeys {
+		if value, ok := targetRoot[key]; ok {
+			sourceRoot[key] = value
+		}
+	}
+
+	mergedBuffer, err := json.MarshalIndent(sourceRoot, "", "  ")
+	if err != nil {
+		return nil, false, err
+	}
+	mergedBuffer = append(mergedBuffer, '\n')
+	return mergedBuffer, !bytes.Equal(mergedBuffer, targetBuffer), nil
+}
+
+func decodeJSONObjectOrEmpty(data []byte) (map[string]any, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return map[string]any{}, nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	return root, nil
 }
 
 func (app *App) copyFileIfDifferent(sourcePath, targetPath, backupLabel string) error {

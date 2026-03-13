@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -285,6 +286,87 @@ func TestValidateOpenClawProfileConfigPreservesRealFailureText(t *testing.T) {
 	}
 	if result.Output == nil || strings.Contains(*result.Output, "punycode") {
 		t.Fatalf("expected filtered output without noise, got %v", result.Output)
+	}
+}
+
+func TestSyncProfileToDefaultPreservesDefaultSkillsConfig(t *testing.T) {
+	rootDir := t.TempDir()
+	writeProfileConfigFixture(t, rootDir, "demo")
+
+	defaultStateDir := filepath.Join(rootDir, ".openclaw")
+	defaultConfigPath := filepath.Join(defaultStateDir, "openclaw.json")
+	defaultAuthStorePath := filepath.Join(defaultStateDir, "agents", "main", "agent", "auth-profiles.json")
+	if err := writeJSONFile(defaultConfigPath, map[string]any{
+		"agents": map[string]any{
+			"defaults": map[string]any{
+				"model": map[string]any{
+					"primary": "anthropic/claude-sonnet-4",
+				},
+			},
+		},
+		"skills": map[string]any{
+			"load": map[string]any{
+				"extraDirs": []string{"/tmp/manager-skills"},
+				"watch":     true,
+			},
+			"entries": map[string]any{
+				"4todo": map[string]any{
+					"enabled": true,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write default config: %v", err)
+	}
+	if err := writeJSONFile(defaultAuthStorePath, defaultAuthStore()); err != nil {
+		t.Fatalf("write default auth store: %v", err)
+	}
+
+	app := &App{
+		homeDir:              rootDir,
+		openclawHomeDir:      rootDir,
+		codexHomeDir:         rootDir,
+		managerDir:           filepath.Join(rootDir, ".manager"),
+		backupDir:            filepath.Join(rootDir, ".manager", "backups"),
+		defaultOpenClawState: defaultStateDir,
+		stateDirCache:        map[string]string{},
+	}
+
+	if err := app.syncProfileToDefault("demo"); err != nil {
+		t.Fatalf("syncProfileToDefault: %v", err)
+	}
+
+	var merged map[string]any
+	data, err := os.ReadFile(defaultConfigPath)
+	if err != nil {
+		t.Fatalf("read merged default config: %v", err)
+	}
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("unmarshal merged default config: %v", err)
+	}
+
+	model := derefString(readOpenClawConfigSnapshot(defaultConfigPath).PrimaryModelID)
+	if model != "openai-codex/gpt-5" {
+		t.Fatalf("expected source model to sync into default config, got %s", model)
+	}
+	skillsMap, ok := merged["skills"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected skills section preserved")
+	}
+	loadMap, ok := skillsMap["load"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected skills.load section preserved")
+	}
+	extraDirs := anyStrings(loadMap["extraDirs"])
+	if len(extraDirs) != 1 || extraDirs[0] != "/tmp/manager-skills" {
+		t.Fatalf("expected default extraDirs to be preserved, got %v", extraDirs)
+	}
+	entriesMap, ok := skillsMap["entries"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected skills.entries preserved")
+	}
+	if _, ok := entriesMap["4todo"]; !ok {
+		t.Fatalf("expected 4todo skill entry preserved")
 	}
 }
 

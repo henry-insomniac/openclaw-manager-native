@@ -282,6 +282,66 @@ func TestDownloadClawHubSkillArchiveRetriesRateLimit(t *testing.T) {
 	}
 }
 
+func TestEnsureManagerSkillsMountConfiguredRepairsMissingExtraDir(t *testing.T) {
+	rootDir := t.TempDir()
+	stateDir := filepath.Join(rootDir, ".openclaw")
+	managerDir := filepath.Join(rootDir, ".manager")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.MkdirAll(managerDir, 0o755); err != nil {
+		t.Fatalf("mkdir manager dir: %v", err)
+	}
+
+	configPath := filepath.Join(stateDir, "openclaw.json")
+	if err := os.WriteFile(configPath, []byte(`{"skills":{"load":{"watch":true}}}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	installRoot := filepath.Join(managerDir, "skills-market")
+	originPath := filepath.Join(installRoot, "demo-skill", ".clawhub", "origin.json")
+	if err := writeJSONFile(originPath, clawHubOriginFile{
+		Version:          1,
+		Registry:         defaultClawHubWebBaseURL,
+		Slug:             "demo-skill",
+		InstalledVersion: ptr("1.2.3"),
+		InstalledAt:      time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("write origin: %v", err)
+	}
+
+	app := &App{
+		homeDir:              rootDir,
+		openclawHomeDir:      rootDir,
+		managerDir:           managerDir,
+		backupDir:            filepath.Join(managerDir, "backups"),
+		defaultOpenClawState: stateDir,
+		stateDirCache:        map[string]string{},
+	}
+
+	repaired, err := app.ensureManagerSkillsMountConfigured()
+	if err != nil {
+		t.Fatalf("ensureManagerSkillsMountConfigured: %v", err)
+	}
+	if !repaired {
+		t.Fatalf("expected mount repair to run")
+	}
+
+	var updated map[string]any
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	if err := json.Unmarshal(data, &updated); err != nil {
+		t.Fatalf("unmarshal updated config: %v", err)
+	}
+	loadMap := ensureMap(ensureMap(updated, "skills"), "load")
+	extraDirs := anyStrings(loadMap["extraDirs"])
+	if !containsString(extraDirs, installRoot) {
+		t.Fatalf("expected install root to be reattached, got %v", extraDirs)
+	}
+}
+
 func TestClassifyInventorySourceRecognizesPersonalSkills(t *testing.T) {
 	skill := OpenClawSkillSummary{
 		Key:    "adapt",

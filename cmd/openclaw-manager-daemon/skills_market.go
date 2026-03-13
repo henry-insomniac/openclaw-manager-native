@@ -559,6 +559,14 @@ func (app *App) fetchOpenClawSkillMarketDetail(rawSlug string, fresh bool) (Open
 }
 
 func (app *App) buildOpenClawSkillsInventory(fresh bool) (OpenClawSkillsInventory, error) {
+	repaired, err := app.ensureManagerSkillsMountConfigured()
+	if err != nil {
+		return OpenClawSkillsInventory{}, err
+	}
+	if repaired {
+		fresh = true
+	}
+
 	installRoot := app.managerSkillsMarketDir()
 	lock := readJSONFile(app.managerSkillsLockPath(), clawHubLockFile{Version: 1, Skills: map[string]clawHubLockSkill{}})
 	if lock.Skills == nil {
@@ -1066,6 +1074,38 @@ func (app *App) readManagerSkillOrigins(installRoot string) map[string]clawHubOr
 	return out
 }
 
+func skillsExtraDirConfigured(extraDirs []string, want string) bool {
+	want = normalizeSkillsExtraDir(want)
+	if want == "" {
+		return false
+	}
+	for _, item := range extraDirs {
+		if normalizeSkillsExtraDir(item) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (app *App) hasManagerInstalledSkills(installRoot string) bool {
+	if len(app.readManagerSkillOrigins(installRoot)) > 0 {
+		return true
+	}
+	if len(app.readManagerSkillLock().Skills) > 0 {
+		return true
+	}
+	entries, err := os.ReadDir(installRoot)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+			return true
+		}
+	}
+	return false
+}
+
 func normalizeSkillsExtraDir(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -1108,6 +1148,26 @@ func (app *App) saveDefaultOpenClawConfigRoot(configPath string, root map[string
 		_ = app.backupFile(configPath, "default-openclaw-config")
 	}
 	return writeJSONFile(configPath, root)
+}
+
+func (app *App) ensureManagerSkillsMountConfigured() (bool, error) {
+	installRoot := app.managerSkillsMarketDir()
+	if !app.hasManagerInstalledSkills(installRoot) {
+		return false, nil
+	}
+
+	configSummary, err := app.readOpenClawSkillsConfigSummary()
+	if err != nil {
+		return false, err
+	}
+	if skillsExtraDirConfigured(configSummary.ExtraDirs, installRoot) {
+		return false, nil
+	}
+	if err := app.ensureManagerSkillsExtraDir(installRoot); err != nil {
+		return false, err
+	}
+	app.invalidateSkillsCaches()
+	return true, nil
 }
 
 func (app *App) ensureManagerSkillsExtraDir(extraDir string) error {
