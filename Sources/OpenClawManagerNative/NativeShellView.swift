@@ -125,6 +125,14 @@ private func configValidationPresentation(_ valid: Bool) -> StatusPresentation {
         : StatusPresentation(label: "需修复", tint: .red)
 }
 
+private func profileConfigValidationDetail(_ result: OpenClawProfileConfigValidationResult) -> String {
+    let checkedAt = formatDate(result.collectedAt)
+    if result.valid {
+        return "已按 OpenClaw CLI 校验 · \(checkedAt)"
+    }
+    return "\(result.detail) · \(checkedAt)"
+}
+
 private func gatewayServicePresentation(_ summary: SupportSummary.Maintenance.GatewayService) -> StatusPresentation {
     if let issue = summary.issue, !issue.isEmpty {
         return StatusPresentation(label: "需处理", tint: .red)
@@ -354,6 +362,12 @@ private func sectionNarrative(for section: NativeSection) -> SectionNarrative {
         return SectionNarrative(
             eyebrow: nil,
             title: "账号池",
+            detail: nil
+        )
+    case .skills:
+        return SectionNarrative(
+            eyebrow: nil,
+            title: "技能",
             detail: nil
         )
     case .settings:
@@ -873,6 +887,7 @@ struct NativeRootView: View {
         SectionDescriptor(section: .overview, title: "总览", caption: "", symbol: "rectangle.grid.2x2"),
         SectionDescriptor(section: .monitor, title: "监控", caption: "", symbol: "waveform.path.ecg.rectangle"),
         SectionDescriptor(section: .profiles, title: "账号池", caption: "", symbol: "person.3"),
+        SectionDescriptor(section: .skills, title: "技能", caption: "", symbol: "square.stack.3d.up.fill"),
         SectionDescriptor(section: .settings, title: "设置", caption: "", symbol: "slider.horizontal.3"),
         SectionDescriptor(section: .diagnostics, title: "诊断", caption: "", symbol: "stethoscope"),
         SectionDescriptor(section: .deployment, title: "命令", caption: "", symbol: "shippingbox")
@@ -1098,6 +1113,8 @@ struct NativeRootView: View {
                             MonitorSection(store: store)
                         case .profiles:
                             ProfilesSection(store: store)
+                        case .skills:
+                            SkillsSection(store: store)
                         case .settings:
                             SettingsSection(store: store)
                         case .diagnostics:
@@ -1189,6 +1206,10 @@ private struct NativeHeaderView: View {
                         scope = .full
                     case .monitor:
                         scope = .monitorOnly
+                    case .skills:
+                        scope = .skillsOnly
+                    case .settings:
+                        scope = .settingsOnly
                     default:
                         scope = .managerOnly
                     }
@@ -2001,6 +2022,11 @@ private struct ProcessLeaderboardRow: View {
 private struct ProfilesSection: View {
     @ObservedObject var store: NativeAppStore
     @State private var newProfileName = ""
+    @State private var showRawProfileConfig = false
+    @State private var showPreviewProfileConfig = false
+    @State private var profileConfigProviderId = ""
+    @State private var profileConfigModelId = ""
+    @State private var profileConfigAuthMode = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2141,6 +2167,241 @@ private struct ProfilesSection: View {
                         }
                     }
                 }
+
+                GridCard(
+                    title: "OpenClaw 配置",
+                    systemImage: "doc.badge.gearshape",
+                    accent: profileConfigAccent(store.openClawProfileConfigDocument, profileName: spotlight.name)
+                ) {
+                    if let document = store.openClawProfileConfigDocument, document.summary.profileName == spotlight.name {
+                        let summary = document.summary
+                        let currentProviderId = summary.primaryProviderId ?? ""
+                        let currentModelId = summary.primaryModelId ?? ""
+                        let currentAuthMode = resolvedProfileAuthMode(summary)
+                        let trimmedDraftProviderId = profileConfigProviderId.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedDraftModelId = profileConfigModelId.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedDraftAuthMode = profileConfigAuthMode.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let configDraftReady = !trimmedDraftProviderId.isEmpty && !trimmedDraftModelId.isEmpty && !trimmedDraftAuthMode.isEmpty
+                        let configDraftChanged = trimmedDraftProviderId != currentProviderId || trimmedDraftModelId != currentModelId || trimmedDraftAuthMode != currentAuthMode
+                        let preview = store.openClawProfileConfigPreview?.profileName == spotlight.name ? store.openClawProfileConfigPreview : nil
+                        VStack(alignment: .leading, spacing: 14) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("状态")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(configValidationPresentation(summary.configValid).label)
+                                    .font(.title3.weight(.semibold))
+                                    .foregroundStyle(configValidationPresentation(summary.configValid).tint)
+                                Text(summary.configDetail)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            TwoColumnFacts(items: [
+                                ("配置文件", summary.configPath),
+                                ("配置更新时间", formatDate(summary.configUpdatedAt)),
+                                ("认证文件", summary.authStorePath),
+                                ("认证更新时间", formatDate(summary.authStoreUpdatedAt)),
+                                ("主 Provider", present(summary.primaryProviderId, fallback: "未识别")),
+                                ("主模型", present(summary.primaryModelId, fallback: "未识别")),
+                                ("认证模式", currentAuthMode),
+                                ("登录能力", present(summary.loginKind, fallback: "未识别")),
+                                ("伴随运行时", present(summary.companionRuntimeKind, fallback: "未识别")),
+                                ("认证文件状态", summary.authStoreValid ? "可读" : summary.authStoreDetail)
+                            ])
+
+                            if spotlight.isActive {
+                                if summary.configValid, document.configHash != nil {
+                                    VStack(alignment: .leading, spacing: 14) {
+                                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                            Text("安全编辑")
+                                                .font(.headline)
+                                            if configDraftChanged {
+                                                TonePill(text: "有未保存变更", tint: NativePalette.amber.opacity(0.18), foreground: NativePalette.amber)
+                                            }
+                                        }
+
+                                        Text("只开放主模型、主 Provider、认证模式这三项。先预览，再应用；应用后会立刻校验，不通过就回滚。")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        AdaptiveLine(spacing: 12) {
+                                            VStack(alignment: .leading, spacing: 8) {
+                                                Text("主 Provider")
+                                                    .font(.caption.weight(.semibold))
+                                                    .foregroundStyle(.secondary)
+                                                TextField("例如 openai-codex", text: $profileConfigProviderId)
+                                                    .textFieldStyle(.roundedBorder)
+                                            }
+                                            VStack(alignment: .leading, spacing: 8) {
+                                                Text("主模型")
+                                                    .font(.caption.weight(.semibold))
+                                                    .foregroundStyle(.secondary)
+                                                TextField("例如 openai-codex/gpt-5", text: $profileConfigModelId)
+                                                    .textFieldStyle(.roundedBorder)
+                                            }
+                                        }
+
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("认证模式")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                            TextField("例如 chatgpt-oauth / api-key / configured", text: $profileConfigAuthMode)
+                                                .textFieldStyle(.roundedBorder)
+                                        }
+
+                                        Text("如果你改了 Provider，主模型前缀也要一起对应；否则预览会直接拦下。")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+
+                                        AdaptiveLine(spacing: 10) {
+                                            ActionButton("预览变更", systemImage: "eye", busy: store.isBusy("profile-config:preview:\(spotlight.name)")) {
+                                                guard let configHash = document.configHash else { return }
+                                                store.previewProfileConfig(
+                                                    profileName: spotlight.name,
+                                                    request: OpenClawProfileConfigEditRequest(
+                                                        baseHash: configHash,
+                                                        patch: OpenClawProfileConfigPatch(
+                                                            primaryProviderId: trimmedDraftProviderId,
+                                                            primaryModelId: trimmedDraftModelId,
+                                                            authMode: trimmedDraftAuthMode
+                                                        )
+                                                    )
+                                                )
+                                            }
+                                            .disabled(!configDraftReady)
+
+                                            ActionButton("应用配置", systemImage: "checkmark.circle", busy: store.isBusy("profile-config:apply:\(spotlight.name)")) {
+                                                guard let configHash = document.configHash else { return }
+                                                store.applyProfileConfig(
+                                                    profileName: spotlight.name,
+                                                    request: OpenClawProfileConfigEditRequest(
+                                                        baseHash: configHash,
+                                                        patch: OpenClawProfileConfigPatch(
+                                                            primaryProviderId: trimmedDraftProviderId,
+                                                            primaryModelId: trimmedDraftModelId,
+                                                            authMode: trimmedDraftAuthMode
+                                                        )
+                                                    )
+                                                )
+                                            }
+                                            .disabled(preview == nil || preview?.changed != true)
+
+                                            Button("还原草稿") {
+                                                profileConfigProviderId = currentProviderId
+                                                profileConfigModelId = currentModelId
+                                                profileConfigAuthMode = currentAuthMode
+                                                store.clearProfileConfigPreview()
+                                            }
+                                            .buttonStyle(NativeSecondaryButtonStyle())
+                                            .disabled(!configDraftChanged)
+                                        }
+
+                                        if let preview {
+                                            CalloutBlock(
+                                                label: "变更预览",
+                                                value: preview.changed ? "准备应用 \(preview.changes.count) 项变更" : "没有变化",
+                                                detail: preview.message
+                                            )
+
+                                            if !preview.changes.isEmpty {
+                                                ForEach(preview.changes) { change in
+                                                    VStack(alignment: .leading, spacing: 6) {
+                                                        Text(change.label)
+                                                            .font(.caption.weight(.semibold))
+                                                            .foregroundStyle(.secondary)
+                                                        Text("\(change.before) -> \(change.after)")
+                                                            .font(.callout)
+                                                            .foregroundStyle(NativePalette.ink)
+                                                            .fixedSize(horizontal: false, vertical: true)
+                                                    }
+                                                    .padding(12)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .background(
+                                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                                            .fill(NativePalette.surfaceAlt)
+                                                    )
+                                                }
+                                            }
+
+                                            Button {
+                                                withAnimation(.easeOut(duration: 0.2)) {
+                                                    showPreviewProfileConfig.toggle()
+                                                }
+                                            } label: {
+                                                Label(showPreviewProfileConfig ? "收起预览配置" : "展开预览配置", systemImage: showPreviewProfileConfig ? "chevron.up" : "chevron.down")
+                                            }
+                                            .buttonStyle(NativeSecondaryButtonStyle())
+
+                                            if showPreviewProfileConfig {
+                                                ConfigCodeBlock(title: "预览 openclaw.json", text: preview.previewConfig)
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    CalloutBlock(
+                                        label: "安全编辑",
+                                        value: "当前不能直接编辑",
+                                        detail: "先把 openclaw.json 修到可解析，再用这里的预览和应用。"
+                                    )
+                                }
+                            } else {
+                                CalloutBlock(
+                                    label: "安全编辑",
+                                    value: "仅当前激活账号可编辑",
+                                    detail: "先切到这个账号，再预览和应用配置。"
+                                )
+                            }
+
+                            AdaptiveLine(spacing: 10) {
+                                ActionButton("刷新配置", systemImage: "arrow.clockwise", busy: store.isBusy("settings:refresh")) {
+                                    store.refreshAll(silent: false, scope: .settingsOnly, busyKey: "settings:refresh")
+                                }
+                                ActionButton("校验这个配置", systemImage: "checklist", busy: store.isBusy("profile-config:validate:\(spotlight.name)")) {
+                                    store.validateProfileConfig(profileName: spotlight.name)
+                                }
+                                Button("打开配置文件") {
+                                    store.open(URL(fileURLWithPath: summary.configPath))
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+                                Button("打开认证文件") {
+                                    store.open(URL(fileURLWithPath: summary.authStorePath))
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+                            }
+
+                            if let validation = store.openClawProfileConfigValidation, validation.profileName == spotlight.name {
+                                CalloutBlock(
+                                    label: "最近校验",
+                                    value: configValidationPresentation(validation.valid).label,
+                                    detail: profileConfigValidationDetail(validation)
+                                )
+                            }
+
+                            Button {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    showRawProfileConfig.toggle()
+                                }
+                            } label: {
+                                Label(showRawProfileConfig ? "收起原始内容" : "展开原始内容", systemImage: showRawProfileConfig ? "chevron.up" : "chevron.down")
+                            }
+                            .buttonStyle(NativeSecondaryButtonStyle())
+
+                            if showRawProfileConfig {
+                                ConfigCodeBlock(title: "openclaw.json", text: document.rawConfig)
+                                ConfigCodeBlock(title: "auth-profiles.json", text: document.rawAuthStore)
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("等待读取 \(spotlight.name) 的配置摘要。")
+                                .foregroundStyle(.secondary)
+                            ActionButton("读取配置", systemImage: "arrow.clockwise", busy: store.isBusy("settings:refresh")) {
+                                store.refreshAll(silent: false, scope: .settingsOnly, busyKey: "settings:refresh")
+                            }
+                        }
+                    }
+                }
             }
 
             if !store.profiles.isEmpty {
@@ -2173,6 +2434,40 @@ private struct ProfilesSection: View {
                 }
             }
         }
+        .onAppear {
+            syncProfileConfigDraft()
+        }
+        .onChange(of: store.selectedProfileName) { _ in
+            syncProfileConfigDraft()
+        }
+        .onChange(of: store.openClawProfileConfigDocument?.configHash) { _ in
+            syncProfileConfigDraft()
+        }
+        .onChange(of: profileConfigProviderId) { _ in
+            store.clearProfileConfigPreview()
+        }
+        .onChange(of: profileConfigModelId) { _ in
+            store.clearProfileConfigPreview()
+        }
+        .onChange(of: profileConfigAuthMode) { _ in
+            store.clearProfileConfigPreview()
+        }
+    }
+
+    private func syncProfileConfigDraft() {
+        guard let document = store.openClawProfileConfigDocument else {
+            profileConfigProviderId = ""
+            profileConfigModelId = ""
+            profileConfigAuthMode = ""
+            showPreviewProfileConfig = false
+            return
+        }
+
+        let summary = document.summary
+        profileConfigProviderId = summary.primaryProviderId ?? ""
+        profileConfigModelId = summary.primaryModelId ?? ""
+        profileConfigAuthMode = resolvedProfileAuthMode(summary)
+        showPreviewProfileConfig = false
     }
 
     private func spotlightGauge(title: String, value: Double, label: String, caption: String, tint: Color) -> some View {
@@ -2339,6 +2634,1062 @@ private struct ProfileCardView: View {
     }
 }
 
+private func profileConfigAccent(_ document: OpenClawProfileConfigDocument?, profileName: String) -> Color {
+    guard let document, document.summary.profileName == profileName else {
+        return NativePalette.surfaceAlt
+    }
+    return configValidationPresentation(document.summary.configValid).tint
+}
+
+private func authModeSummary(_ authModes: [String: String]) -> String {
+    if authModes.isEmpty {
+        return "未识别"
+    }
+    return authModes
+        .sorted { $0.key < $1.key }
+        .map { "\($0.key): \($0.value)" }
+        .joined(separator: " · ")
+}
+
+private func resolvedProfileAuthMode(_ summary: OpenClawProfileConfigSummary) -> String {
+    if let provider = summary.primaryProviderId, let mode = summary.authModes[provider], !mode.isEmpty {
+        return mode
+    }
+    if summary.primaryProviderId == "openai-codex" {
+        return "chatgpt-oauth"
+    }
+    return "configured"
+}
+
+private func boolLabel(_ value: Bool?) -> String {
+    guard let value else { return "未配置" }
+    return value ? "开启" : "关闭"
+}
+
+private func skillsInstallPreferBrewSummary(_ value: Bool?) -> String {
+    guard let value else { return "未配置" }
+    return value ? "优先 Homebrew" : "不优先 Homebrew"
+}
+
+private func skillsInstallPreferBrewMode(_ value: Bool?) -> String {
+    guard let value else { return "default" }
+    return value ? "prefer-brew" : "prefer-direct"
+}
+
+private func skillsInstallPreferBrewValue(_ selection: String) -> Bool? {
+    switch selection {
+    case "prefer-brew":
+        return true
+    case "prefer-direct":
+        return false
+    default:
+        return nil
+    }
+}
+
+private func skillsInstallNodeManagerDraftValue(_ value: String?) -> String {
+    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed
+}
+
+private func skillsInstallNodeManagerSummary(_ value: String?) -> String {
+    let trimmed = skillsInstallNodeManagerDraftValue(value)
+    return trimmed.isEmpty ? "未配置" : trimmed
+}
+
+private func skillsInstallNodeManagerOptions(selection: String) -> [String] {
+    let common = ["npm", "pnpm", "yarn", "bun"]
+    let trimmed = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty || common.contains(trimmed) {
+        return common
+    }
+    return [trimmed] + common
+}
+
+private func bundledAllowlistSummary(_ values: [String]) -> String {
+    if values.isEmpty {
+        return "未限制"
+    }
+    if values.count <= 3 {
+        return values.joined(separator: ", ")
+    }
+    return "\(values.prefix(3).joined(separator: ", ")) +\(values.count - 3)"
+}
+
+private func skillStatusTint(_ skill: OpenClawSkillsSummary.Skill) -> Color {
+    switch skill.status {
+    case "ready":
+        return NativePalette.mint
+    case "disabled":
+        return NativePalette.surfaceAlt
+    case "blocked":
+        return NativePalette.rose
+    default:
+        return NativePalette.amber
+    }
+}
+
+private func skillStatusLabel(_ skill: OpenClawSkillsSummary.Skill) -> String {
+    switch skill.status {
+    case "ready":
+        return "可用"
+    case "disabled":
+        return "已禁用"
+    case "blocked":
+        return "受限"
+    default:
+        return "缺依赖"
+    }
+}
+
+private func skillSummaryLine(_ skill: OpenClawSkillsSummary.Skill) -> String {
+    let missing = [
+        skill.missing.bins.isEmpty ? nil : "缺命令 \(skill.missing.bins.joined(separator: ", "))",
+        skill.missing.anyBins.isEmpty ? nil : "缺任一命令 \(skill.missing.anyBins.joined(separator: ", "))",
+        skill.missing.env.isEmpty ? nil : "缺环境变量 \(skill.missing.env.joined(separator: ", "))",
+        skill.missing.config.isEmpty ? nil : "缺配置 \(skill.missing.config.joined(separator: ", "))",
+        skill.primaryEnv
+    ].compactMap { value -> String? in
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+    if !missing.isEmpty {
+        return missing.joined(separator: " · ")
+    }
+    if let homepage = skill.homepage, !homepage.isEmpty {
+        return homepage
+    }
+    return present(skill.description, fallback: "无附加说明")
+}
+
+private func skillsInventorySourceLabel(_ source: String) -> String {
+    switch source {
+    case "manager-installed":
+        return "市场安装"
+    case "personal":
+        return "本地个人"
+    case "workspace":
+        return "项目技能"
+    case "global":
+        return "全局技能"
+    case "bundled":
+        return "Bundled"
+    default:
+        return "外部来源"
+    }
+}
+
+private func skillsInventorySourceTint(_ source: String) -> Color {
+    switch source {
+    case "manager-installed":
+        return NativePalette.accent
+    case "personal":
+        return NativePalette.mint
+    case "workspace":
+        return NativePalette.mint
+    case "global":
+        return NativePalette.amber
+    case "bundled":
+        return NativePalette.surfaceAlt
+    default:
+        return NativePalette.rose
+    }
+}
+
+private func skillsMarketItemCategories(_ item: OpenClawSkillsMarketSummary.Item, categories: [String: String]) -> String {
+    let titles = item.categoryIds.compactMap { categories[$0] }
+    if titles.isEmpty {
+        return "未分类"
+    }
+    if titles.count <= 2 {
+        return titles.joined(separator: " · ")
+    }
+    return "\(titles.prefix(2).joined(separator: " · ")) +\(titles.count - 2)"
+}
+
+private func skillModerationPresentation(_ moderation: OpenClawSkillMarketDetail.Moderation?) -> (label: String, tint: Color, foreground: Color) {
+    guard let moderation else {
+        return ("未读取", NativePalette.surfaceAlt, NativePalette.ink)
+    }
+    if moderation.isMalwareBlocked {
+        return ("已拦截", NativePalette.rose, .white)
+    }
+    if moderation.isSuspicious || moderation.verdict == "suspicious" {
+        return ("需复核", NativePalette.amber, .white)
+    }
+    return ("未见拦截", NativePalette.mint, .white)
+}
+
+private func skillRuntimeStatusLabel(_ item: OpenClawSkillsInventory.Item) -> String {
+    if let runtimeStatus = item.runtimeStatus, !runtimeStatus.isEmpty {
+        switch runtimeStatus {
+        case "ready":
+            return "运行可用"
+        case "disabled":
+            return "已禁用"
+        case "blocked":
+            return "被限制"
+        case "missing_requirements":
+            return "缺依赖"
+        default:
+            return runtimeStatus
+        }
+    }
+    return item.visibleInRuntime ? "已加载" : "待刷新"
+}
+
+private func normalizedDisplayPath(_ path: String) -> String {
+    let expanded = (path as NSString).expandingTildeInPath
+    return expanded.isEmpty ? path : expanded
+}
+
+private func pathsReferToSameLocation(_ lhs: String, _ rhs: String?) -> Bool {
+    guard let rhs else { return false }
+    let left = URL(fileURLWithPath: normalizedDisplayPath(lhs)).standardizedFileURL.path
+    let right = URL(fileURLWithPath: normalizedDisplayPath(rhs)).standardizedFileURL.path
+    return left == right
+}
+
+private func skillTogglePresentation(_ item: OpenClawSkillsInventory.Item) -> (label: String, icon: String, enable: Bool) {
+    if item.runtimeStatus == "blocked", item.bundled {
+        return ("允许并启用", "checkmark.circle", true)
+    }
+    if item.runtimeStatus == "disabled" || item.enabled == false {
+        return ("启用", "checkmark.circle", true)
+    }
+    return ("停用", "pause.circle", false)
+}
+
+private struct SkillsInventoryGroup: Identifiable {
+    var id: String
+    var title: String
+    var detail: String
+    var items: [OpenClawSkillsInventory.Item]
+}
+
+private enum SkillsWorkspace: String, CaseIterable, Identifiable {
+    case market
+    case inventory
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .market:
+            return "浏览市场"
+        case .inventory:
+            return "本地库存"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .market:
+            return "查找、筛选、安装"
+        case .inventory:
+            return "查找、分组、卸载"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .market:
+            return "sparkles.square.filled.on.square"
+        case .inventory:
+            return "shippingbox"
+        }
+    }
+}
+
+private func skillsInventoryGroupMeta(for source: String) -> (title: String, detail: String, rank: Int) {
+    switch source {
+    case "manager-installed":
+        return ("市场安装", "可直接卸载", 0)
+    case "personal":
+        return ("本地个人", "当前机器已有的自定义 skills", 1)
+    case "workspace":
+        return ("项目技能", "来自当前工作区", 2)
+    case "global":
+        return ("全局技能", "来自 OpenClaw 全局目录", 3)
+    case "external":
+        return ("其他来源", "来源未完全识别", 4)
+    case "bundled":
+        return ("Bundled", "OpenClaw 自带，不建议删除", 5)
+    default:
+        return (skillsInventorySourceLabel(source), "来源未分类", 6)
+    }
+}
+
+private struct ConfigCodeBlock: View {
+    let title: String
+    let text: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(text ?? "未提供原始内容")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            }
+            .frame(maxHeight: 220)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(NativePalette.surfaceAlt)
+            )
+        }
+    }
+}
+
+private struct SkillsSection: View {
+    @ObservedObject var store: NativeAppStore
+    @State private var activeWorkspace: SkillsWorkspace = .market
+    @State private var marketSearchText = ""
+    @State private var inventorySearchText = ""
+    @State private var selectedCategoryID = ""
+    @State private var selectedSkillSlug: String?
+    @State private var showBundledSkills = false
+    @State private var showMarketEnvironment = false
+    @State private var showDetailRequirements = false
+    @State private var showDetailChangelog = false
+    @State private var expandedInventoryGroups: Set<String> = ["manager-installed", "personal"]
+
+    private var categoryLookup: [String: String] {
+        Dictionary(uniqueKeysWithValues: (store.skillsMarketSummary?.categories ?? []).map { ($0.id, $0.title) })
+    }
+
+    private var marketLookup: [String: OpenClawSkillsMarketSummary.Item] {
+        Dictionary(uniqueKeysWithValues: (store.skillsMarketSummary?.items ?? []).map { ($0.slug, $0) })
+    }
+
+    private var inventoryLookup: [String: OpenClawSkillsInventory.Item] {
+        Dictionary(uniqueKeysWithValues: (store.skillsInventory?.items ?? []).map { ($0.slug, $0) })
+    }
+
+    private var filteredMarketItems: [OpenClawSkillsMarketSummary.Item] {
+        guard let items = store.skillsMarketSummary?.items else { return [] }
+        let query = marketSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return items.filter { item in
+            let matchesQuery: Bool
+            if query.isEmpty {
+                matchesQuery = true
+            } else {
+                matchesQuery =
+                    item.name.lowercased().contains(query) ||
+                    item.slug.lowercased().contains(query) ||
+                    item.owner.lowercased().contains(query) ||
+                    item.summary.lowercased().contains(query)
+            }
+            let matchesCategory = selectedCategoryID.isEmpty || item.categoryIds.contains(selectedCategoryID)
+            return matchesQuery && matchesCategory
+        }
+    }
+
+    private var displayedMarketItems: [OpenClawSkillsMarketSummary.Item] {
+        let limit = (marketSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && selectedCategoryID.isEmpty) ? 72 : 180
+        return Array(filteredMarketItems.prefix(limit))
+    }
+
+    private var filteredInventoryItems: [OpenClawSkillsInventory.Item] {
+        guard let items = store.skillsInventory?.items else { return [] }
+        let query = inventorySearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return items.filter { item in
+            if !showBundledSkills && item.source == "bundled" {
+                return false
+            }
+            if query.isEmpty {
+                return true
+            }
+            return
+                item.name.lowercased().contains(query) ||
+                item.slug.lowercased().contains(query) ||
+                item.summary.lowercased().contains(query) ||
+                skillsInventorySourceLabel(item.source).lowercased().contains(query)
+        }
+    }
+
+    private var inventoryGroups: [SkillsInventoryGroup] {
+        var grouped: [String: [OpenClawSkillsInventory.Item]] = [:]
+        for item in filteredInventoryItems {
+            grouped[item.source, default: []].append(item)
+        }
+        return grouped.map { source, items in
+            let meta = skillsInventoryGroupMeta(for: source)
+            return SkillsInventoryGroup(
+                id: source,
+                title: meta.title,
+                detail: meta.detail,
+                items: items.sorted { left, right in
+                    left.name.localizedLowercase < right.name.localizedLowercase
+                }
+            )
+        }
+        .sorted { left, right in
+            skillsInventoryGroupMeta(for: left.id).rank < skillsInventoryGroupMeta(for: right.id).rank
+        }
+    }
+
+    private var isInventoryFiltering: Bool {
+        !inventorySearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var selectedDetail: OpenClawSkillMarketDetail? {
+        guard let selectedSkillSlug else { return nil }
+        guard let detail = store.skillMarketDetail, detail.item.slug == selectedSkillSlug else { return nil }
+        return detail
+    }
+
+    private var selectedInventoryItem: OpenClawSkillsInventory.Item? {
+        if let selectedSkillSlug {
+            return inventoryLookup[selectedSkillSlug]
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SectionLead(
+                title: "技能",
+                detail: ""
+            )
+
+            skillsWorkbenchCard
+            activeWorkspaceContent
+        }
+    }
+
+    private var skillsWorkbenchCard: some View {
+        GridCard(title: "技能工作台", systemImage: activeWorkspace.systemImage, accent: NativePalette.accent) {
+            VStack(alignment: .leading, spacing: 16) {
+                AdaptiveLine(spacing: 14) {
+                    InlineStatusColumn(
+                        title: "精选市场",
+                        value: "\(store.skillsMarketSummary?.totalItems ?? 0) 个",
+                        detail: "来自 awesome-openclaw-skills",
+                        accent: NativePalette.accent
+                    )
+                    InlineStatusColumn(
+                        title: "托管安装",
+                        value: "\(store.skillsInventory?.managerInstalled ?? 0) 个",
+                        detail: present(store.skillsInventory?.managedDirectory, fallback: "等待库存"),
+                        accent: NativePalette.mint
+                    )
+                    InlineStatusColumn(
+                        title: "本地个人",
+                        value: "\(store.skillsInventory?.personalInstalled ?? 0) 个",
+                        detail: "Bundled \(store.skillsInventory?.bundledInstalled ?? 0) · 总计 \(store.skillsInventory?.totalItems ?? 0)",
+                        accent: NativePalette.amber
+                    )
+                }
+
+                AdaptiveLine(spacing: 10) {
+                    ForEach(SkillsWorkspace.allCases) { workspace in
+                        workspaceChip(workspace)
+                    }
+                    Spacer(minLength: 0)
+                    ActionButton("刷新技能", systemImage: "arrow.clockwise", busy: store.isBusy("skills:refresh")) {
+                        store.refreshAll(silent: false, scope: .skillsOnly, busyKey: "skills:refresh")
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var activeWorkspaceContent: some View {
+        switch activeWorkspace {
+        case .market:
+            marketWorkspace
+        case .inventory:
+            inventoryWorkspace
+        }
+    }
+
+    private var marketWorkspace: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            marketControlsCard
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 18) {
+                    marketListCard
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    marketDetailCard
+                        .frame(width: 380, alignment: .topLeading)
+                }
+                VStack(alignment: .leading, spacing: 18) {
+                    marketDetailCard
+                    marketListCard
+                }
+            }
+        }
+    }
+
+    private var inventoryWorkspace: some View {
+        localInventoryCard
+    }
+
+    private func workspaceChip(_ workspace: SkillsWorkspace) -> some View {
+        let selected = activeWorkspace == workspace
+        return Button {
+            withAnimation(.easeOut(duration: 0.18)) {
+                activeWorkspace = workspace
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: workspace.systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(workspace.title)
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(workspace.detail)
+                        .font(.caption2)
+                        .foregroundStyle(selected ? NativePalette.ink.opacity(0.78) : .secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(selected ? NativePalette.surfaceRaised : NativePalette.surfaceAlt)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(selected ? NativePalette.borderStrong : NativePalette.border, lineWidth: 1)
+            )
+            .foregroundStyle(selected ? NativePalette.ink : .secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func categoryChip(title: String, id: String) -> some View {
+        let selected = selectedCategoryID == id
+        return Button {
+            withAnimation(.easeOut(duration: 0.18)) {
+                selectedCategoryID = id
+            }
+        } label: {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(selected ? NativePalette.surfaceRaised : NativePalette.surfaceAlt)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(selected ? NativePalette.borderStrong : NativePalette.border, lineWidth: 1)
+                )
+                .foregroundStyle(selected ? NativePalette.ink : .secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var marketControlsCard: some View {
+        GridCard(title: "浏览与筛选", systemImage: "line.3.horizontal.decrease.circle", accent: NativePalette.accent) {
+            VStack(alignment: .leading, spacing: 14) {
+                AdaptiveLine(spacing: 12) {
+                    TextField("按名称、slug、作者搜索", text: $marketSearchText)
+                        .textFieldStyle(.roundedBorder)
+                    if let managedDirectory = store.skillsInventory?.managedDirectory {
+                        Button("打开托管目录") {
+                            store.open(URL(fileURLWithPath: managedDirectory))
+                        }
+                        .buttonStyle(NativeSecondaryButtonStyle())
+                    }
+                }
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        categoryChip(title: "全部", id: "")
+                        ForEach(store.skillsMarketSummary?.categories ?? []) { category in
+                            categoryChip(title: "\(category.title) \(category.count)", id: category.id)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                HStack {
+                    Text("筛选后 \(filteredMarketItems.count) 项，当前展示 \(displayedMarketItems.count) 项")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if filteredMarketItems.count > displayedMarketItems.count {
+                        Text("继续缩小范围会更容易挑选")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                DisclosureGroup(isExpanded: $showMarketEnvironment) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        TwoColumnFacts(items: [
+                            ("市场来源", present(store.skillsMarketSummary?.sourceRepo)),
+                            ("配置文件", present(store.openClawSkillsConfig?.configPath)),
+                            ("托管目录", present(store.skillsInventory?.managedDirectory)),
+                            ("库存文件", present(store.skillsInventory?.lockPath)),
+                            ("Bundled 白名单", bundledAllowlistSummary(store.openClawSkillsConfig?.allowBundled ?? [])),
+                            ("额外挂载目录", "\(store.openClawSkillsConfig?.extraDirs.count ?? 0)")
+                        ])
+
+                        AdaptiveLine(spacing: 10) {
+                            if let configPath = store.openClawSkillsConfig?.configPath {
+                                Button("打开配置文件") {
+                                    store.open(URL(fileURLWithPath: configPath))
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+                            }
+                            if let managedDirectory = store.skillsInventory?.managedDirectory {
+                                Button("打开库存文件夹") {
+                                    store.open(URL(fileURLWithPath: managedDirectory))
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+                            }
+                        }
+                    }
+                    .padding(.top, 10)
+                } label: {
+                    Text("环境与来源")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NativePalette.ink)
+                }
+                .tint(NativePalette.ink)
+            }
+        }
+    }
+
+    private var marketListCard: some View {
+        GridCard(title: "结果列表", subtitle: "awesome-openclaw-skills", systemImage: "square.stack.3d.up.fill", accent: NativePalette.accent) {
+            VStack(alignment: .leading, spacing: 14) {
+                if let marketSummary = store.skillsMarketSummary {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(displayedMarketItems) { item in
+                            marketRow(item, selected: selectedSkillSlug == item.slug)
+                        }
+                    }
+
+                    if filteredMarketItems.isEmpty {
+                        Text("当前筛选没有命中结果。")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("目录快照: \(formatDate(marketSummary.collectedAt))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("等待技能市场摘要。")
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func marketRow(_ item: OpenClawSkillsMarketSummary.Item, selected: Bool) -> some View {
+        let installed = inventoryLookup[item.slug]
+        return Button {
+            selectedSkillSlug = item.slug
+            activeWorkspace = .market
+            showDetailRequirements = false
+            showDetailChangelog = false
+            store.loadSkillMarketDetail(slug: item.slug)
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(item.name)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(NativePalette.ink)
+                    if let installed {
+                        if installed.uninstallable {
+                            TonePill(text: "已安装", tint: NativePalette.accent.opacity(0.20), foreground: NativePalette.accent)
+                        } else {
+                            TonePill(
+                                text: skillsInventorySourceLabel(installed.source),
+                                tint: skillsInventorySourceTint(installed.source).opacity(0.18),
+                                foreground: skillsInventorySourceTint(installed.source)
+                            )
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Text(item.owner)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Text(item.summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text(skillsMarketItemCategories(item, categories: categoryLookup))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    if let installed {
+                        Text(installed.uninstallable ? "可卸载" : "本机已存在")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if store.isBusy("skill:detail:\(item.slug)") {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(selected ? NativePalette.surfaceRaised : NativePalette.surfaceAlt)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(selected ? NativePalette.borderStrong : NativePalette.border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var marketDetailCard: some View {
+        GridCard(title: "详情与操作", systemImage: "info.bubble", accent: NativePalette.amber) {
+            if let detail = selectedDetail {
+                let moderation = skillModerationPresentation(detail.moderation)
+                let installed = selectedInventoryItem
+
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Text(detail.item.name)
+                                .font(.system(size: 26, weight: .bold, design: .rounded))
+                                .foregroundStyle(NativePalette.ink)
+                            TonePill(text: moderation.label, tint: moderation.tint, foreground: moderation.foreground)
+                        }
+
+                        Text(detail.item.summary)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if let installed {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: installed.uninstallable ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
+                                .foregroundStyle(installed.uninstallable ? NativePalette.mint : NativePalette.amber)
+                            Text(installed.uninstallable
+                                ? "这个 skill 已经安装在 Manager 托管目录里，可以直接卸载。"
+                                : "这个 skill 在本机已经存在，但不属于 Manager 托管目录；这里不会直接删除外部目录。")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill((installed.uninstallable ? NativePalette.mint : NativePalette.amber).opacity(0.10))
+                        )
+                    }
+
+                    TwoColumnFacts(items: [
+                        ("slug", detail.item.slug),
+                        ("作者", present(detail.owner?.displayName ?? detail.owner?.handle, fallback: detail.item.owner)),
+                        ("最新版本", present(detail.latestVersion?.version)),
+                        ("下载量", "\(detail.stats.downloads)"),
+                        ("Stars", "\(detail.stats.stars)"),
+                        ("最近更新", formatDate(detail.updatedAt))
+                    ])
+
+                    if let moderationSummary = detail.moderation?.summary, !moderationSummary.isEmpty {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: detail.moderation?.isMalwareBlocked == true ? "xmark.shield.fill" : "exclamationmark.shield.fill")
+                                .foregroundStyle(detail.moderation?.isMalwareBlocked == true ? NativePalette.rose : NativePalette.amber)
+                            Text(moderationSummary)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill((detail.moderation?.isMalwareBlocked == true ? NativePalette.rose : NativePalette.amber).opacity(0.12))
+                        )
+                    }
+
+                    DisclosureGroup(isExpanded: $showDetailRequirements) {
+                        TwoColumnFacts(items: [
+                            ("OS", detail.metadata.os.isEmpty ? "未声明" : detail.metadata.os.joined(separator: ", ")),
+                            ("系统能力", detail.metadata.systems.isEmpty ? "未声明" : detail.metadata.systems.joined(separator: ", "))
+                        ])
+                        .padding(.top, 10)
+                    } label: {
+                        Text("运行要求")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(NativePalette.ink)
+                    }
+                    .tint(NativePalette.ink)
+
+                    if let changelog = detail.latestVersion?.changelog, !changelog.isEmpty {
+                        DisclosureGroup(isExpanded: $showDetailChangelog) {
+                            Text(changelog)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.top, 10)
+                        } label: {
+                            Text("版本说明")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(NativePalette.ink)
+                        }
+                        .tint(NativePalette.ink)
+                    }
+
+                    AdaptiveLine(spacing: 10) {
+                        if let installed {
+                            let toggle = skillTogglePresentation(installed)
+                            ActionButton(toggle.label, systemImage: toggle.icon, busy: store.isBusy("skill:\(toggle.enable ? "enable" : "disable"):\(detail.item.slug)")) {
+                                store.setSkillEnabled(slug: detail.item.slug, enabled: toggle.enable, bundled: installed.bundled)
+                            }
+
+                            if installed.uninstallable {
+                                ActionButton("卸载", systemImage: "trash", busy: store.isBusy("skill:uninstall:\(detail.item.slug)")) {
+                                    store.uninstallSkill(slug: detail.item.slug)
+                                }
+                            }
+                        } else {
+                            ActionButton("安装", systemImage: "square.and.arrow.down", busy: store.isBusy("skill:install:\(detail.item.slug)")) {
+                                store.installSkill(slug: detail.item.slug)
+                            }
+                            .disabled(detail.moderation?.isMalwareBlocked == true)
+                        }
+
+                        if let url = URL(string: detail.item.registryUrl) {
+                            Button("打开 ClawHub") {
+                                store.open(url)
+                            }
+                            .buttonStyle(NativeSecondaryButtonStyle())
+                        }
+                        if let url = URL(string: detail.item.githubUrl) {
+                            Button("打开源码") {
+                                store.open(url)
+                            }
+                            .buttonStyle(NativeSecondaryButtonStyle())
+                        }
+                    }
+                    if store.isBusy("skill:install:\(detail.item.slug)") {
+                        Text("如果刚好遇到 ClawHub 限流，安装会自动等待后继续，不需要重复点。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else if let selectedSkillSlug, store.isBusy("skill:detail:\(selectedSkillSlug)") {
+                HStack(spacing: 12) {
+                    ProgressView()
+                    Text("读取技能详情。")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("先在结果列表里选一个 skill，再决定是否安装。")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var localInventoryCard: some View {
+        GridCard(title: "本地库存", systemImage: "shippingbox", accent: NativePalette.mint) {
+            if let inventory = store.skillsInventory {
+                VStack(alignment: .leading, spacing: 16) {
+                    AdaptiveLine(spacing: 14) {
+                        InlineStatusColumn(
+                            title: "市场安装",
+                            value: "\(inventory.managerInstalled)",
+                            detail: "可直接卸载",
+                            accent: NativePalette.accent
+                        )
+                        InlineStatusColumn(
+                            title: "本地个人",
+                            value: "\(inventory.personalInstalled)",
+                            detail: "当前用户已有 skills",
+                            accent: NativePalette.mint
+                        )
+                        InlineStatusColumn(
+                            title: "Bundled",
+                            value: "\(inventory.bundledInstalled)",
+                            detail: "总计 \(inventory.totalItems)",
+                            accent: NativePalette.amber
+                        )
+                    }
+
+                    AdaptiveLine(spacing: 12) {
+                        TextField("在本地库存里查找名称、slug 或来源", text: $inventorySearchText)
+                            .textFieldStyle(.roundedBorder)
+                        Toggle("显示 Bundled", isOn: $showBundledSkills)
+                            .toggleStyle(.switch)
+                            .frame(width: 140)
+                        if !inventory.managedDirectory.isEmpty {
+                            Button("打开托管目录") {
+                                store.open(URL(fileURLWithPath: inventory.managedDirectory))
+                            }
+                            .buttonStyle(NativeSecondaryButtonStyle())
+                        }
+                    }
+
+                    if let runtimeError = inventory.runtimeError, !runtimeError.isEmpty {
+                        Text(runtimeError)
+                            .font(.caption)
+                            .foregroundStyle(NativePalette.rose)
+                    }
+
+                    if inventoryGroups.isEmpty {
+                        Text("当前筛选没有命中任何本地 skill。")
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ForEach(inventoryGroups) { group in
+                        VStack(alignment: .leading, spacing: 10) {
+                            if isInventoryFiltering {
+                                inventoryGroupHeader(group)
+                                ForEach(group.items) { item in
+                                    inventoryRow(item)
+                                }
+                            } else {
+                                DisclosureGroup(isExpanded: inventoryGroupBinding(group.id)) {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        ForEach(group.items) { item in
+                                            inventoryRow(item)
+                                        }
+                                    }
+                                    .padding(.top, 10)
+                                } label: {
+                                    inventoryGroupHeader(group)
+                                }
+                                .tint(NativePalette.ink)
+                            }
+                        }
+
+                        if group.id != inventoryGroups.last?.id {
+                            Divider()
+                                .overlay(NativePalette.border)
+                        }
+                    }
+                }
+            } else {
+                Text("等待已安装技能库存。")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func inventoryGroupBinding(_ groupID: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedInventoryGroups.contains(groupID) },
+            set: { expanded in
+                if expanded {
+                    expandedInventoryGroups.insert(groupID)
+                } else {
+                    expandedInventoryGroups.remove(groupID)
+                }
+            }
+        )
+    }
+
+    private func inventoryGroupHeader(_ group: SkillsInventoryGroup) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(group.title)
+                    .font(.headline)
+                Text(group.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("\(group.items.count) 项")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func inventoryRow(_ item: OpenClawSkillsInventory.Item) -> some View {
+        let toggle = skillTogglePresentation(item)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(item.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(NativePalette.ink)
+                TonePill(
+                    text: skillsInventorySourceLabel(item.source),
+                    tint: skillsInventorySourceTint(item.source).opacity(0.18),
+                    foreground: skillsInventorySourceTint(item.source)
+                )
+                Spacer(minLength: 0)
+                Text(skillRuntimeStatusLabel(item))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(item.summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            AdaptiveLine(spacing: 8) {
+                Text(item.slug)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                if let version = item.installedVersion, !version.isEmpty {
+                    TonePill(text: "v\(version)", tint: NativePalette.surfaceAlt, foreground: NativePalette.ink)
+                }
+                if let installedAt = item.installedAt, !installedAt.isEmpty {
+                    TonePill(text: formatDate(installedAt), tint: NativePalette.surfaceAlt, foreground: NativePalette.ink)
+                }
+            }
+
+            AdaptiveLine(spacing: 10) {
+                ActionButton(toggle.label, systemImage: toggle.icon, busy: store.isBusy("skill:\(toggle.enable ? "enable" : "disable"):\(item.slug)")) {
+                    store.setSkillEnabled(slug: item.slug, enabled: toggle.enable, bundled: item.bundled)
+                }
+
+                if item.managerOwned {
+                    ActionButton("卸载", systemImage: "trash", busy: store.isBusy("skill:uninstall:\(item.slug)")) {
+                        store.uninstallSkill(slug: item.slug)
+                    }
+                } else if marketLookup[item.slug] != nil {
+                    Button("查看市场详情") {
+                        activeWorkspace = .market
+                        selectedSkillSlug = item.slug
+                        showDetailRequirements = false
+                        showDetailChangelog = false
+                        store.loadSkillMarketDetail(slug: item.slug)
+                    }
+                    .buttonStyle(NativeSecondaryButtonStyle())
+                }
+
+                if let homepage = item.homepage, let url = URL(string: homepage) {
+                    Button("打开主页") {
+                        store.open(url)
+                    }
+                    .buttonStyle(NativeSecondaryButtonStyle())
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(NativePalette.surfaceAlt)
+        )
+    }
+}
+
 private struct SettingsSection: View {
     @ObservedObject var store: NativeAppStore
     @State private var autoActivateEnabled = true
@@ -2347,6 +3698,11 @@ private struct SettingsSection: View {
     @State private var fiveHourDrainPercent = 15
     @State private var weekDrainPercent = 10
     @State private var autoStatuses: Set<ProfileStatus> = [.draining, .cooldown, .exhausted, .reauthRequired, .unknown]
+    @State private var skillsWatchEnabled = false
+    @State private var skillsWatchDebounceMs = 1500
+    @State private var skillsInstallPreferBrewSelection = "default"
+    @State private var skillsInstallNodeManagerSelection = ""
+    @State private var showAllSkills = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -2444,6 +3800,301 @@ private struct SettingsSection: View {
                     }
                 }
 
+                GridCard(title: "OpenClaw Skills", systemImage: "square.stack.3d.up.fill", accent: NativePalette.amber) {
+                    if let skillsSummary = store.openClawSkillsSummary, let skillsConfig = store.openClawSkillsConfig {
+                        let visibleSkills = showAllSkills ? skillsSummary.skills : Array(skillsSummary.skills.prefix(12))
+                        let currentSkillsWatch = skillsConfig.watch ?? false
+                        let currentSkillsDebounceMs = max(100, skillsConfig.watchDebounceMs ?? 1500)
+                        let skillsDraftChanged = skillsWatchEnabled != currentSkillsWatch || skillsWatchDebounceMs != currentSkillsDebounceMs
+                        let currentInstallPreferBrewSelection = skillsInstallPreferBrewMode(skillsConfig.installPreferBrew)
+                        let currentInstallNodeManagerSelection = skillsInstallNodeManagerDraftValue(skillsConfig.installNodeManager)
+                        let installDraftChanged = skillsInstallPreferBrewSelection != currentInstallPreferBrewSelection || skillsInstallNodeManagerSelection != currentInstallNodeManagerSelection
+
+                        VStack(alignment: .leading, spacing: 16) {
+                            AdaptiveLine(spacing: 14) {
+                                InlineStatusColumn(
+                                    title: "可用",
+                                    value: "\(skillsSummary.readySkills)",
+                                    detail: "总数 \(skillsSummary.totalSkills)",
+                                    accent: NativePalette.mint
+                                )
+                                InlineStatusColumn(
+                                    title: "缺依赖",
+                                    value: "\(skillsSummary.missingSkills)",
+                                    detail: "禁用 \(skillsSummary.disabledSkills)",
+                                    accent: NativePalette.amber
+                                )
+                                InlineStatusColumn(
+                                    title: "已配置",
+                                    value: "\(skillsSummary.configuredSkills)",
+                                    detail: skillsConfig.exists ? "entries \(skillsConfig.entryCount)" : "未发现配置",
+                                    accent: NativePalette.accent
+                                )
+                            }
+
+                            TwoColumnFacts(items: [
+                                ("配置文件", skillsConfig.configPath),
+                                ("配置状态", skillsConfig.valid ? "可读" : skillsConfig.detail),
+                                ("Bundled 白名单", bundledAllowlistSummary(skillsConfig.allowBundled)),
+                                ("额外挂载目录", "\(skillsConfig.extraDirs.count)"),
+                                ("目录监听", boolLabel(skillsConfig.watch)),
+                                ("Homebrew 优先", skillsInstallPreferBrewSummary(skillsConfig.installPreferBrew)),
+                                ("Node 管理器", skillsInstallNodeManagerSummary(skillsConfig.installNodeManager)),
+                                ("工作区", present(skillsSummary.workspaceDir)),
+                                ("托管目录", present(skillsSummary.managedSkillsDir))
+                            ])
+
+                            AdaptiveLine(spacing: 10) {
+                                ActionButton("刷新 Skills", systemImage: "arrow.clockwise", busy: store.isBusy("settings:refresh")) {
+                                    store.refreshAll(silent: false, scope: .settingsOnly, busyKey: "settings:refresh")
+                                }
+                                ActionButton("新增挂载目录", systemImage: "plus", busy: store.isBusy("skills:add-extra-dir")) {
+                                    store.addSkillsExtraDir()
+                                }
+                                Button("打开配置文件") {
+                                    store.open(URL(fileURLWithPath: skillsConfig.configPath))
+                                }
+                                .buttonStyle(NativeSecondaryButtonStyle())
+                                if let managedSkillsDir = skillsSummary.managedSkillsDir {
+                                    Button("打开托管目录") {
+                                        store.open(URL(fileURLWithPath: managedSkillsDir))
+                                    }
+                                    .buttonStyle(NativeSecondaryButtonStyle())
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text("额外挂载目录")
+                                        .font(.headline)
+                                    Spacer()
+                                    Text("\(skillsConfig.extraDirs.count) 项")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if skillsConfig.extraDirs.isEmpty {
+                                    Text("现在没有额外挂载目录。要接入自己的 skills 目录，就把那个目录加进来。")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    ForEach(skillsConfig.extraDirs, id: \.self) { extraDir in
+                                        let isManagedDir = pathsReferToSameLocation(extraDir, skillsSummary.managedSkillsDir)
+                                        VStack(alignment: .leading, spacing: 10) {
+                                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                                Text(extraDir)
+                                                    .font(.caption.monospaced())
+                                                    .foregroundStyle(NativePalette.ink)
+                                                    .textSelection(.enabled)
+                                                    .lineLimit(2)
+                                                    .fixedSize(horizontal: false, vertical: true)
+                                                if isManagedDir {
+                                                    TonePill(text: "托管目录", tint: NativePalette.accent.opacity(0.18), foreground: NativePalette.accent)
+                                                }
+                                            }
+
+                                            Text(isManagedDir ? "这个目录由安装功能自动维护，建议在技能页管理，不在这里移除。" : "这个目录里的 skills 会跟着 OpenClaw 一起读取。")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+
+                                            AdaptiveLine(spacing: 10) {
+                                                Button("打开目录") {
+                                                    store.open(URL(fileURLWithPath: normalizedDisplayPath(extraDir)))
+                                                }
+                                                .buttonStyle(NativeSecondaryButtonStyle())
+                                                if !isManagedDir {
+                                                    ActionButton("移除目录", systemImage: "minus.circle", busy: store.isBusy("skills:remove-extra-dir:\(extraDir)")) {
+                                                        store.removeSkillsExtraDir(path: extraDir)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        .padding(12)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                                .fill(NativePalette.surfaceAlt)
+                                        )
+                                    }
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text("目录监听")
+                                        .font(.headline)
+                                    if skillsDraftChanged {
+                                        TonePill(text: "有未保存变更", tint: NativePalette.amber.opacity(0.18), foreground: NativePalette.amber)
+                                    }
+                                }
+
+                                Text(skillsWatchEnabled ? "检测到目录变化后，会按下面的防抖时间自动重读 skills。" : "现在只会在手动刷新时重读目录。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Toggle("检测目录变化", isOn: $skillsWatchEnabled)
+                                    .toggleStyle(.switch)
+
+                                Stepper(value: $skillsWatchDebounceMs, in: 100...10_000, step: 100) {
+                                    KeyValueLine(label: "防抖时间", value: "\(skillsWatchDebounceMs) ms")
+                                }
+
+                                Text("目录变化频繁时，OpenClaw 会等这段时间后再重新读取，避免反复触发。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                AdaptiveLine(spacing: 10) {
+                                    ActionButton("保存监听设置", systemImage: "square.and.arrow.down", busy: store.isBusy("skills:config:save")) {
+                                        store.saveSkillsConfig(OpenClawSkillsConfigPatch(
+                                            addExtraDir: nil,
+                                            removeExtraDir: nil,
+                                            watch: skillsWatchEnabled,
+                                            watchDebounceMs: skillsWatchDebounceMs,
+                                            installPreferBrew: nil,
+                                            clearInstallPreferBrew: nil,
+                                            installNodeManager: nil,
+                                            clearInstallNodeManager: nil
+                                        ))
+                                    }
+                                    .disabled(!skillsDraftChanged)
+
+                                    Button("还原草稿") {
+                                        skillsWatchEnabled = currentSkillsWatch
+                                        skillsWatchDebounceMs = currentSkillsDebounceMs
+                                    }
+                                    .buttonStyle(NativeSecondaryButtonStyle())
+                                    .disabled(!skillsDraftChanged)
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                    Text("安装工具")
+                                        .font(.headline)
+                                    if installDraftChanged {
+                                        TonePill(text: "有未保存变更", tint: NativePalette.amber.opacity(0.18), foreground: NativePalette.amber)
+                                    }
+                                }
+
+                                Text("这里只影响后续从市场安装 skill 时优先用哪套工具；未配置时沿用 OpenClaw 默认行为。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                AdaptiveLine(spacing: 14) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Homebrew")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        Picker("Homebrew", selection: $skillsInstallPreferBrewSelection) {
+                                            Text("未配置").tag("default")
+                                            Text("优先 Homebrew").tag("prefer-brew")
+                                            Text("不优先 Homebrew").tag("prefer-direct")
+                                        }
+                                        .labelsHidden()
+                                        .pickerStyle(.menu)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Node 管理器")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        Picker("Node 管理器", selection: $skillsInstallNodeManagerSelection) {
+                                            Text("未配置").tag("")
+                                            ForEach(skillsInstallNodeManagerOptions(selection: skillsInstallNodeManagerSelection), id: \.self) { value in
+                                                Text(value).tag(value)
+                                            }
+                                        }
+                                        .labelsHidden()
+                                        .pickerStyle(.menu)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                Text("常见值是 `npm`、`pnpm`、`yarn`、`bun`。如果你没特别要求，保持未配置最稳妥。")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                AdaptiveLine(spacing: 10) {
+                                    ActionButton("保存安装设置", systemImage: "square.and.arrow.down", busy: store.isBusy("skills:config:save")) {
+                                        let nextPreferBrew = skillsInstallPreferBrewValue(skillsInstallPreferBrewSelection)
+                                        let nextNodeManager = skillsInstallNodeManagerSelection.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        store.saveSkillsConfig(OpenClawSkillsConfigPatch(
+                                            addExtraDir: nil,
+                                            removeExtraDir: nil,
+                                            watch: nil,
+                                            watchDebounceMs: nil,
+                                            installPreferBrew: nextPreferBrew,
+                                            clearInstallPreferBrew: nextPreferBrew == nil ? true : nil,
+                                            installNodeManager: nextNodeManager.isEmpty ? nil : nextNodeManager,
+                                            clearInstallNodeManager: nextNodeManager.isEmpty ? true : nil
+                                        ))
+                                    }
+                                    .disabled(!installDraftChanged)
+
+                                    Button("还原草稿") {
+                                        skillsInstallPreferBrewSelection = currentInstallPreferBrewSelection
+                                        skillsInstallNodeManagerSelection = currentInstallNodeManagerSelection
+                                    }
+                                    .buttonStyle(NativeSecondaryButtonStyle())
+                                    .disabled(!installDraftChanged)
+                                }
+                            }
+
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Skills 列表")
+                                    .font(.headline)
+
+                                ForEach(visibleSkills) { skill in
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                            Text(skill.name)
+                                                .font(.system(size: 15, weight: .semibold))
+                                                .foregroundStyle(NativePalette.ink)
+                                            TonePill(
+                                                text: skillStatusLabel(skill),
+                                                tint: skillStatusTint(skill)
+                                            )
+                                            Spacer(minLength: 0)
+                                            Text(skill.source)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        Text(skillSummaryLine(skill))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .fill(NativePalette.surfaceAlt)
+                                    )
+                                }
+
+                                if skillsSummary.skills.count > 12 {
+                                    Button(showAllSkills ? "收起列表" : "展开全部 \(skillsSummary.skills.count) 项") {
+                                        withAnimation(.easeOut(duration: 0.2)) {
+                                            showAllSkills.toggle()
+                                        }
+                                    }
+                                    .buttonStyle(NativeSecondaryButtonStyle())
+                                }
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("等待 OpenClaw Skills 摘要。")
+                                .foregroundStyle(.secondary)
+                            ActionButton("读取 Skills", systemImage: "arrow.clockwise", busy: store.isBusy("settings:refresh")) {
+                                store.refreshAll(silent: false, scope: .settingsOnly, busyKey: "settings:refresh")
+                            }
+                        }
+                    }
+                }
+
                 GridCard(title: "自动切换", systemImage: "arrow.triangle.branch", accent: NativePalette.mint) {
                     VStack(alignment: .leading, spacing: 16) {
                         Toggle("启用自动切换", isOn: $autoActivateEnabled)
@@ -2515,17 +4166,139 @@ private struct SettingsSection: View {
         .onChange(of: store.summary?.generatedAt) { _ in
             syncDraft()
         }
+        .onChange(of: store.openClawSkillsConfig?.collectedAt) { _ in
+            syncDraft()
+        }
     }
 
     private func syncDraft() {
-        guard let automation = store.automation else { return }
-        autoActivateEnabled = automation.enabled
-        probeWindowMinSeconds = max(30, automation.probeIntervalMinMs / 1000)
-        probeWindowMaxSeconds = max(probeWindowMinSeconds, automation.probeIntervalMaxMs / 1000)
-        fiveHourDrainPercent = automation.fiveHourDrainPercent
-        weekDrainPercent = automation.weekDrainPercent
-        autoStatuses = Set(automation.autoSwitchStatuses)
+        if let automation = store.automation {
+            autoActivateEnabled = automation.enabled
+            probeWindowMinSeconds = max(30, automation.probeIntervalMinMs / 1000)
+            probeWindowMaxSeconds = max(probeWindowMinSeconds, automation.probeIntervalMaxMs / 1000)
+            fiveHourDrainPercent = automation.fiveHourDrainPercent
+            weekDrainPercent = automation.weekDrainPercent
+            autoStatuses = Set(automation.autoSwitchStatuses)
+        }
+
+        if let skillsConfig = store.openClawSkillsConfig {
+            skillsWatchEnabled = skillsConfig.watch ?? false
+            skillsWatchDebounceMs = max(100, skillsConfig.watchDebounceMs ?? 1500)
+            skillsInstallPreferBrewSelection = skillsInstallPreferBrewMode(skillsConfig.installPreferBrew)
+            skillsInstallNodeManagerSelection = skillsInstallNodeManagerDraftValue(skillsConfig.installNodeManager)
+        }
     }
+}
+
+private struct OpenClawSkillRow: View {
+    let skill: OpenClawSkillsSummary.Skill
+
+    var body: some View {
+        let presentation = skillsStatusPresentation(skill.status)
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("\(skill.emoji ?? "🧩") \(skill.name)")
+                    .font(.headline)
+                    .foregroundStyle(NativePalette.ink)
+                Spacer(minLength: 0)
+                TonePill(text: presentation.label, tint: presentation.tint, foreground: presentation.foreground)
+            }
+
+            if !skill.description.isEmpty {
+                Text(skill.description)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            AdaptiveLine(spacing: 8) {
+                TonePill(text: skillsSourceLabel(skill.source), tint: NativePalette.surfaceAlt, foreground: NativePalette.ink)
+                if skill.configConfigured {
+                    TonePill(
+                        text: skill.configEnabled == false ? "本地配置 禁用" : "本地配置 已写入",
+                        tint: NativePalette.accent.opacity(0.18),
+                        foreground: NativePalette.accent
+                    )
+                }
+                if skill.hasApiKeyConfig {
+                    TonePill(text: "已配置密钥", tint: NativePalette.mint.opacity(0.18), foreground: NativePalette.mint)
+                }
+                if skill.hasEnvConfig {
+                    TonePill(text: "含 env 覆盖", tint: NativePalette.amber.opacity(0.2), foreground: NativePalette.amber)
+                }
+            }
+
+            if let missing = skillsMissingSummary(skill.missing) {
+                Text(missing)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(NativePalette.surfaceAlt)
+        )
+    }
+}
+
+private func triStateLabel(_ value: Bool?) -> String {
+    guard let value else { return "默认" }
+    return value ? "开" : "关"
+}
+
+private func skillsStatusPresentation(_ status: String) -> (label: String, tint: Color, foreground: Color) {
+    switch status {
+    case "ready":
+        return ("Ready", NativePalette.mint.opacity(0.18), NativePalette.mint)
+    case "disabled":
+        return ("禁用", NativePalette.surfaceAlt, NativePalette.ink)
+    case "blocked":
+        return ("受限", NativePalette.amber.opacity(0.2), NativePalette.amber)
+    default:
+        return ("缺依赖", NativePalette.rose.opacity(0.18), NativePalette.rose)
+    }
+}
+
+private func skillsSourceLabel(_ source: String) -> String {
+    switch source {
+    case "openclaw-bundled":
+        return "Bundled"
+    case "workspace":
+        return "Workspace"
+    case "managed":
+        return "Managed"
+    case "extra-dir":
+        return "Extra Dir"
+    default:
+        return source.isEmpty ? "未知来源" : source
+    }
+}
+
+private func skillsMissingSummary(_ missing: OpenClawSkillsSummary.Missing) -> String? {
+    var parts: [String] = []
+    if !missing.bins.isEmpty {
+        parts.append("缺命令: \(missing.bins.joined(separator: ", "))")
+    }
+    if !missing.anyBins.isEmpty {
+        parts.append("缺任一命令组: \(missing.anyBins.joined(separator: ", "))")
+    }
+    if !missing.env.isEmpty {
+        parts.append("缺环境变量: \(missing.env.joined(separator: ", "))")
+    }
+    if !missing.config.isEmpty {
+        parts.append("缺配置项: \(missing.config.joined(separator: ", "))")
+    }
+    if !missing.os.isEmpty {
+        parts.append("系统不满足: \(missing.os.joined(separator: ", "))")
+    }
+    if parts.isEmpty {
+        return nil
+    }
+    return parts.joined(separator: " · ")
 }
 
 private struct DiagnosticsSection: View {

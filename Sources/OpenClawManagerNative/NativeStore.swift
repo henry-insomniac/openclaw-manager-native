@@ -89,6 +89,7 @@ enum NativeSection: String, CaseIterable, Identifiable, Sendable {
     case overview
     case monitor
     case profiles
+    case skills
     case settings
     case diagnostics
     case deployment
@@ -376,6 +377,88 @@ struct SupportRepairResult: Decodable, Equatable, Sendable {
     var summary: SupportSummary
 }
 
+struct OpenClawProfileConfigSummary: Decodable, Equatable, Sendable {
+    var collectedAt: String
+    var profileName: String
+    var stateDir: String
+    var configPath: String
+    var authStorePath: String
+    var configExists: Bool
+    var authStoreExists: Bool
+    var configValid: Bool
+    var authStoreValid: Bool
+    var configDetail: String
+    var authStoreDetail: String
+    var primaryProviderId: String?
+    var primaryModelId: String?
+    var configuredProviderIds: [String]
+    var authModes: [String: String]
+    var loginKind: String?
+    var companionRuntimeKind: String?
+    var configUpdatedAt: String?
+    var authStoreUpdatedAt: String?
+}
+
+struct OpenClawProfileConfigDocument: Decodable, Equatable, Sendable {
+    var summary: OpenClawProfileConfigSummary
+    var rawConfig: String?
+    var rawAuthStore: String?
+    var configHash: String?
+    var authStoreHash: String?
+}
+
+struct OpenClawProfileConfigValidationResult: Decodable, Equatable, Sendable {
+    var collectedAt: String
+    var profileName: String
+    var configPath: String
+    var valid: Bool
+    var detail: String
+    var output: String?
+}
+
+struct OpenClawProfileConfigPatch: Encodable, Equatable, Sendable {
+    var primaryProviderId: String?
+    var primaryModelId: String?
+    var authMode: String?
+}
+
+struct OpenClawProfileConfigEditRequest: Encodable, Equatable, Sendable {
+    var baseHash: String
+    var patch: OpenClawProfileConfigPatch
+}
+
+struct OpenClawProfileConfigFieldChange: Decodable, Equatable, Identifiable, Sendable {
+    var key: String
+    var label: String
+    var before: String
+    var after: String
+
+    var id: String { key }
+}
+
+struct OpenClawProfileConfigPreviewResult: Decodable, Equatable, Sendable {
+    var collectedAt: String
+    var profileName: String
+    var configPath: String
+    var baseHash: String
+    var nextHash: String
+    var changed: Bool
+    var message: String
+    var changes: [OpenClawProfileConfigFieldChange]
+    var previewConfig: String
+}
+
+struct OpenClawProfileConfigApplyResult: Decodable, Equatable, Sendable {
+    var ok: Bool
+    var profileName: String
+    var configPath: String
+    var appliedHash: String
+    var changed: Bool
+    var message: String
+    var changes: [OpenClawProfileConfigFieldChange]
+    var validation: OpenClawProfileConfigValidationResult
+}
+
 struct MachineSummary: Decodable, Equatable, Sendable {
     struct OpenClaw: Decodable, Equatable, Sendable {
         var available: Bool
@@ -523,6 +606,76 @@ struct MachineTrendSample: Equatable, Identifiable, Sendable {
     var id: String { collectedAt }
 }
 
+struct OpenClawSkillsConfigSummary: Decodable, Equatable, Sendable {
+    struct Entry: Decodable, Equatable, Identifiable, Sendable {
+        var key: String
+        var enabled: Bool?
+        var hasEnv: Bool
+        var hasApiKey: Bool
+
+        var id: String { key }
+    }
+
+    var collectedAt: String
+    var configPath: String
+    var exists: Bool
+    var valid: Bool
+    var detail: String
+    var allowBundled: [String]
+    var extraDirs: [String]
+    var watch: Bool?
+    var watchDebounceMs: Int?
+    var installPreferBrew: Bool?
+    var installNodeManager: String?
+    var entryCount: Int
+    var updatedAt: String?
+    var entries: [Entry]
+}
+
+struct OpenClawSkillsSummary: Decodable, Equatable, Sendable {
+    struct Missing: Decodable, Equatable, Sendable {
+        var bins: [String]
+        var anyBins: [String]
+        var env: [String]
+        var config: [String]
+        var os: [String]
+    }
+
+    struct Skill: Decodable, Equatable, Identifiable, Sendable {
+        var key: String
+        var name: String
+        var description: String
+        var emoji: String?
+        var source: String
+        var bundled: Bool
+        var status: String
+        var enabled: Bool
+        var eligible: Bool
+        var blockedByAllowlist: Bool
+        var homepage: String?
+        var primaryEnv: String?
+        var configConfigured: Bool
+        var configEnabled: Bool?
+        var hasEnvConfig: Bool
+        var hasApiKeyConfig: Bool
+        var missing: Missing
+
+        var id: String { key }
+    }
+
+    var collectedAt: String
+    var configPath: String
+    var workspaceDir: String?
+    var managedSkillsDir: String?
+    var totalSkills: Int
+    var readySkills: Int
+    var disabledSkills: Int
+    var blockedSkills: Int
+    var missingSkills: Int
+    var configuredSkills: Int
+    var skills: [Skill]
+}
+
 struct NativeLocalSnapshot: Equatable, Sendable {
     var config: RuntimeConfig
     var runtimeRootPath: String?
@@ -544,6 +697,17 @@ struct AutomationSettingsPatch: Encodable, Equatable, Sendable {
     var autoSwitchStatuses: [ProfileStatus]
 }
 
+struct OpenClawSkillsConfigPatch: Encodable, Equatable, Sendable {
+    var addExtraDir: String?
+    var removeExtraDir: String?
+    var watch: Bool?
+    var watchDebounceMs: Int?
+    var installPreferBrew: Bool?
+    var clearInstallPreferBrew: Bool?
+    var installNodeManager: String?
+    var clearInstallNodeManager: Bool?
+}
+
 struct NativeNotice: Equatable, Identifiable, Sendable {
     enum Tone: String, Sendable {
         case info
@@ -563,6 +727,8 @@ enum NativeRefreshScope: Sendable {
     case managerOnly
     case monitorOnly
     case supportOnly
+    case settingsOnly
+    case skillsOnly
 }
 
 struct NativeRefreshRequest: Sendable {
@@ -585,6 +751,14 @@ struct NativeRefreshRequest: Sendable {
     static func supportOnly(silent: Bool = true) -> NativeRefreshRequest {
         NativeRefreshRequest(silent: silent, scope: .supportOnly, busyKey: nil)
     }
+
+    static func settingsOnly(silent: Bool = true) -> NativeRefreshRequest {
+        NativeRefreshRequest(silent: silent, scope: .settingsOnly, busyKey: nil)
+    }
+
+    static func skillsOnly(silent: Bool = true) -> NativeRefreshRequest {
+        NativeRefreshRequest(silent: silent, scope: .skillsOnly, busyKey: nil)
+    }
 }
 
 struct NativeAppActions: Sendable {
@@ -595,7 +769,11 @@ struct NativeAppActions: Sendable {
     var probeProfile: @Sendable (String) -> Void = { _ in }
     var activateProfile: @Sendable (String) -> Void = { _ in }
     var activateRecommended: @Sendable () -> Void = {}
+    var validateProfileConfig: @Sendable (String) -> Void = { _ in }
+    var previewProfileConfig: @Sendable (String, OpenClawProfileConfigEditRequest) -> Void = { _, _ in }
+    var applyProfileConfig: @Sendable (String, OpenClawProfileConfigEditRequest) -> Void = { _, _ in }
     var saveAutomation: @Sendable (AutomationSettingsPatch) -> Void = { _ in }
+    var saveSkillsConfig: @Sendable (OpenClawSkillsConfigPatch) -> Void = { _ in }
     var runAutomationTick: @Sendable () -> Void = {}
     var selectOpenClawRoot: @Sendable () -> Void = {}
     var resetOpenClawRoot: @Sendable () -> Void = {}
@@ -606,6 +784,12 @@ struct NativeAppActions: Sendable {
     var openManagerStateDirectory: @Sendable () -> Void = {}
     var restartServices: @Sendable () -> Void = {}
     var supportRepair: @Sendable (SupportRepairAction) -> Void = { _ in }
+    var loadSkillMarketDetail: @Sendable (String) -> Void = { _ in }
+    var installSkill: @Sendable (String) -> Void = { _ in }
+    var uninstallSkill: @Sendable (String) -> Void = { _ in }
+    var setSkillEnabled: @Sendable (String, Bool, Bool) -> Void = { _, _, _ in }
+    var addSkillsExtraDir: @Sendable () -> Void = {}
+    var removeSkillsExtraDir: @Sendable (String) -> Void = { _ in }
     var openURL: @Sendable (URL) -> Void = { _ in }
     var openActivityMonitor: @Sendable () -> Void = {}
     var openGatewayLog: @Sendable () -> Void = {}
@@ -617,6 +801,14 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     @Published var summary: ManagerSummary?
     @Published var supportSummary: SupportSummary?
     @Published var machineSummary: MachineSummary?
+    @Published var openClawProfileConfigDocument: OpenClawProfileConfigDocument?
+    @Published var openClawProfileConfigValidation: OpenClawProfileConfigValidationResult?
+    @Published var openClawProfileConfigPreview: OpenClawProfileConfigPreviewResult?
+    @Published var openClawSkillsSummary: OpenClawSkillsSummary?
+    @Published var openClawSkillsConfig: OpenClawSkillsConfigSummary?
+    @Published var skillsMarketSummary: OpenClawSkillsMarketSummary?
+    @Published var skillsInventory: OpenClawSkillsInventory?
+    @Published var skillMarketDetail: OpenClawSkillMarketDetail?
     @Published var machineHistory: [MachineTrendSample] = []
     @Published var lastSupportRepairResult: SupportRepairResult?
     @Published var loginFlow: LoginFlowSnapshot?
@@ -629,6 +821,10 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
                 actions.refreshAll(.full(silent: true))
             case .monitor:
                 actions.refreshAll(.monitorOnly(silent: true))
+            case .skills:
+                actions.refreshAll(.skillsOnly(silent: true))
+            case .settings, .profiles:
+                actions.refreshAll(.settingsOnly(silent: true))
             default:
                 break
             }
@@ -684,6 +880,10 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         return activeProfile ?? recommendedProfile ?? profiles.first
     }
 
+    var configFocusProfileName: String? {
+        selectedProfile?.name ?? activeProfile?.name ?? profiles.first?.name
+    }
+
     func configure(actions: NativeAppActions) {
         self.actions = actions
     }
@@ -703,6 +903,14 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         started = false
         didResolveInitialLandingSection = false
         machineHistory = []
+        openClawProfileConfigDocument = nil
+        openClawProfileConfigValidation = nil
+        openClawProfileConfigPreview = nil
+        openClawSkillsSummary = nil
+        openClawSkillsConfig = nil
+        skillsMarketSummary = nil
+        skillsInventory = nil
+        skillMarketDetail = nil
     }
 
     func scheduleRefreshTimer() {
@@ -716,6 +924,10 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
                 request = .full(silent: true)
             case .monitor:
                 request = .monitorOnly(silent: true)
+            case .skills:
+                request = .skillsOnly(silent: true)
+            case .settings:
+                request = .settingsOnly(silent: true)
             default:
                 request = .managerOnly(silent: true)
             }
@@ -763,6 +975,44 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
 
     func applySupportRefresh(_ supportSummary: SupportSummary) {
         self.supportSummary = supportSummary
+        isLoading = false
+    }
+
+    func applySettingsRefresh(
+        profileConfigDocument: OpenClawProfileConfigDocument?,
+        skillsSummary: OpenClawSkillsSummary,
+        skillsConfig: OpenClawSkillsConfigSummary
+    ) {
+        openClawProfileConfigDocument = profileConfigDocument
+        openClawProfileConfigPreview = nil
+        openClawSkillsSummary = skillsSummary
+        openClawSkillsConfig = skillsConfig
+        isLoading = false
+    }
+
+    func applyProfileConfigValidation(_ result: OpenClawProfileConfigValidationResult) {
+        openClawProfileConfigValidation = result
+    }
+
+    func applyProfileConfigPreview(_ result: OpenClawProfileConfigPreviewResult) {
+        openClawProfileConfigPreview = result
+    }
+
+    func applySkillsRefresh(
+        skillsSummary: OpenClawSkillsSummary,
+        skillsConfig: OpenClawSkillsConfigSummary,
+        marketSummary: OpenClawSkillsMarketSummary,
+        inventory: OpenClawSkillsInventory
+    ) {
+        openClawSkillsSummary = skillsSummary
+        openClawSkillsConfig = skillsConfig
+        skillsMarketSummary = marketSummary
+        skillsInventory = inventory
+        isLoading = false
+    }
+
+    func applySkillMarketDetail(_ detail: OpenClawSkillMarketDetail) {
+        skillMarketDetail = detail
         isLoading = false
     }
 
@@ -849,8 +1099,13 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
     }
 
     func selectProfile(_ name: String?) {
+        let shouldRefreshSettings = started && selectedSection == .profiles
         selectedProfileName = name
+        openClawProfileConfigPreview = nil
         selectedSection = .profiles
+        if shouldRefreshSettings {
+            actions.refreshAll(.settingsOnly(silent: true))
+        }
     }
 
     func openPendingLoginInBrowser() {
@@ -866,6 +1121,30 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
 
     func openActivityMonitor() {
         actions.openActivityMonitor()
+    }
+
+    func loadSkillMarketDetail(slug: String) {
+        actions.loadSkillMarketDetail(slug)
+    }
+
+    func installSkill(slug: String) {
+        actions.installSkill(slug)
+    }
+
+    func uninstallSkill(slug: String) {
+        actions.uninstallSkill(slug)
+    }
+
+    func setSkillEnabled(slug: String, enabled: Bool, bundled: Bool) {
+        actions.setSkillEnabled(slug, enabled, bundled)
+    }
+
+    func addSkillsExtraDir() {
+        actions.addSkillsExtraDir()
+    }
+
+    func removeSkillsExtraDir(path: String) {
+        actions.removeSkillsExtraDir(path)
     }
 
     func createProfile(named name: String) {
@@ -892,8 +1171,28 @@ final class NativeAppStore: ObservableObject, @unchecked Sendable {
         actions.activateRecommended()
     }
 
+    func validateProfileConfig(profileName: String) {
+        actions.validateProfileConfig(profileName)
+    }
+
+    func previewProfileConfig(profileName: String, request: OpenClawProfileConfigEditRequest) {
+        actions.previewProfileConfig(profileName, request)
+    }
+
+    func applyProfileConfig(profileName: String, request: OpenClawProfileConfigEditRequest) {
+        actions.applyProfileConfig(profileName, request)
+    }
+
+    func clearProfileConfigPreview() {
+        openClawProfileConfigPreview = nil
+    }
+
     func saveAutomation(_ patch: AutomationSettingsPatch) {
         actions.saveAutomation(patch)
+    }
+
+    func saveSkillsConfig(_ patch: OpenClawSkillsConfigPatch) {
+        actions.saveSkillsConfig(patch)
     }
 
     func runAutomationTick() {

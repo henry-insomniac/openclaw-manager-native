@@ -36,6 +36,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private var latestManagerSummary: ManagerSummary?
     private var latestSupportSummary: SupportSummary?
     private var latestMachineSummary: MachineSummary?
+    private var latestOpenClawProfileConfigDocument: OpenClawProfileConfigDocument?
+    private var latestOpenClawSkillsSummary: OpenClawSkillsSummary?
+    private var latestOpenClawSkillsConfig: OpenClawSkillsConfigSummary?
+    private var latestSkillsMarketSummary: OpenClawSkillsMarketSummary?
+    private var latestSkillsInventory: OpenClawSkillsInventory?
     private var lastMenuBarError: String?
     private var isRestarting = false
 
@@ -137,9 +142,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                     self?.activateRecommended()
                 }
             },
+            validateProfileConfig: { [weak self] profileName in
+                Task { @MainActor [weak self] in
+                    self?.validateProfileConfig(profileName)
+                }
+            },
+            previewProfileConfig: { [weak self] profileName, request in
+                Task { @MainActor [weak self] in
+                    self?.previewProfileConfig(profileName, request: request)
+                }
+            },
+            applyProfileConfig: { [weak self] profileName, request in
+                Task { @MainActor [weak self] in
+                    self?.applyProfileConfig(profileName, request: request)
+                }
+            },
             saveAutomation: { [weak self] patch in
                 Task { @MainActor [weak self] in
                     self?.saveAutomation(patch)
+                }
+            },
+            saveSkillsConfig: { [weak self] patch in
+                Task { @MainActor [weak self] in
+                    self?.saveSkillsConfig(patch)
                 }
             },
             runAutomationTick: { [weak self] in
@@ -190,6 +215,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             supportRepair: { [weak self] action in
                 Task { @MainActor [weak self] in
                     self?.runSupportRepair(action)
+                }
+            },
+            loadSkillMarketDetail: { [weak self] slug in
+                Task { @MainActor [weak self] in
+                    self?.loadSkillMarketDetail(slug)
+                }
+            },
+            installSkill: { [weak self] slug in
+                Task { @MainActor [weak self] in
+                    self?.installSkill(slug)
+                }
+            },
+            uninstallSkill: { [weak self] slug in
+                Task { @MainActor [weak self] in
+                    self?.uninstallSkill(slug)
+                }
+            },
+            setSkillEnabled: { [weak self] slug, enabled, bundled in
+                Task { @MainActor [weak self] in
+                    self?.setSkillEnabled(slug, enabled: enabled, bundled: bundled)
+                }
+            },
+            addSkillsExtraDir: { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.selectSkillsExtraDir()
+                }
+            },
+            removeSkillsExtraDir: { [weak self] path in
+                Task { @MainActor [weak self] in
+                    self?.removeSkillsExtraDir(path)
                 }
             },
             openURL: { url in
@@ -549,6 +604,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
+    private func applySettingsRefreshedState(
+        profileConfigDocument: OpenClawProfileConfigDocument?,
+        skillsSummary: OpenClawSkillsSummary,
+        skillsConfig: OpenClawSkillsConfigSummary
+    ) {
+        latestOpenClawProfileConfigDocument = profileConfigDocument
+        latestOpenClawSkillsSummary = skillsSummary
+        latestOpenClawSkillsConfig = skillsConfig
+        lastMenuBarError = nil
+        store.applySettingsRefresh(
+            profileConfigDocument: profileConfigDocument,
+            skillsSummary: skillsSummary,
+            skillsConfig: skillsConfig
+        )
+    }
+
+    @MainActor
+    private func applySkillsRefreshedState(
+        skillsSummary: OpenClawSkillsSummary,
+        skillsConfig: OpenClawSkillsConfigSummary,
+        marketSummary: OpenClawSkillsMarketSummary,
+        inventory: OpenClawSkillsInventory
+    ) {
+        latestOpenClawSkillsSummary = skillsSummary
+        latestOpenClawSkillsConfig = skillsConfig
+        latestSkillsMarketSummary = marketSummary
+        latestSkillsInventory = inventory
+        lastMenuBarError = nil
+        store.applySkillsRefresh(
+            skillsSummary: skillsSummary,
+            skillsConfig: skillsConfig,
+            marketSummary: marketSummary,
+            inventory: inventory
+        )
+    }
+
+    @MainActor
     private func refreshStartupData(showErrorAlerts: Bool = false, silentForStore: Bool = true) {
         refreshManagerData(scope: .managerOnly, showErrorAlerts: showErrorAlerts, silentForStore: silentForStore)
         refreshManagerData(scope: .monitorOnly, silentForStore: true)
@@ -576,6 +668,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             latestManagerSummary = nil
             latestSupportSummary = nil
             latestMachineSummary = nil
+            latestOpenClawProfileConfigDocument = nil
+            latestOpenClawSkillsSummary = nil
+            latestOpenClawSkillsConfig = nil
+            latestSkillsMarketSummary = nil
+            latestSkillsInventory = nil
             lastMenuBarError = "本地服务还没有启动完成"
             pushLocalSnapshotToStore()
             rebuildStatusItemMenu()
@@ -594,10 +691,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                 let summaryBox = RequestResultBox<ManagerSummary>()
                 let supportBox = RequestResultBox<SupportSummary>()
                 let machineBox = RequestResultBox<MachineSummary>()
-                let includeManager = scope != .monitorOnly && scope != .supportOnly
+                let profileConfigBox = RequestResultBox<OpenClawProfileConfigDocument>()
+                let skillsSummaryBox = RequestResultBox<OpenClawSkillsSummary>()
+                let skillsConfigBox = RequestResultBox<OpenClawSkillsConfigSummary>()
+                let skillsMarketBox = RequestResultBox<OpenClawSkillsMarketSummary>()
+                let skillsInventoryBox = RequestResultBox<OpenClawSkillsInventory>()
+                let includeManager = scope != .monitorOnly && scope != .supportOnly && scope != .settingsOnly && scope != .skillsOnly
                 let includeSupport = scope == .full || scope == .supportOnly
                 let includeMachine = scope == .full || scope == .monitorOnly
+                let includeSettings = scope == .settingsOnly || scope == .skillsOnly
+                let includeSkills = scope == .skillsOnly
                 let supportPath = !silentForStore ? "/api/support/summary?fresh=1" : "/api/support/summary"
+                let skillsPath = !silentForStore ? "/api/openclaw/skills?fresh=1" : "/api/openclaw/skills"
+                let skillsMarketPath = !silentForStore ? "/api/openclaw/skills/market?fresh=1" : "/api/openclaw/skills/market"
+                let skillsInventoryPath = !silentForStore ? "/api/openclaw/skills/inventory?fresh=1" : "/api/openclaw/skills/inventory"
                 let group = DispatchGroup()
 
                 if includeManager {
@@ -642,9 +749,138 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                     }
                 }
 
+                if includeSettings {
+                    let focusProfileName = scope == .settingsOnly ? self.store.configFocusProfileName : nil
+
+                    if let focusProfileName {
+                        group.enter()
+                        DispatchQueue.global(qos: .utility).async { [weak self] in
+                            defer { group.leave() }
+                            guard let self else { return }
+                            let encoded = focusProfileName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? focusProfileName
+                            do {
+                                let document: OpenClawProfileConfigDocument = try self.performManagerRequest(
+                                    path: "/api/openclaw/profiles/\(encoded)/config/document"
+                                )
+                                profileConfigBox.value = .success(document)
+                            } catch {
+                                profileConfigBox.value = .failure(error)
+                            }
+                        }
+                    }
+
+                    group.enter()
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        defer { group.leave() }
+                        guard let self else { return }
+                        do {
+                            let skillsSummary: OpenClawSkillsSummary = try self.performManagerRequest(path: skillsPath)
+                            skillsSummaryBox.value = .success(skillsSummary)
+                        } catch {
+                            skillsSummaryBox.value = .failure(error)
+                        }
+                    }
+
+                    group.enter()
+                    DispatchQueue.global(qos: .utility).async { [weak self] in
+                        defer { group.leave() }
+                        guard let self else { return }
+                        do {
+                            let skillsConfig: OpenClawSkillsConfigSummary = try self.performManagerRequest(path: "/api/openclaw/skills/config")
+                            skillsConfigBox.value = .success(skillsConfig)
+                        } catch {
+                            skillsConfigBox.value = .failure(error)
+                        }
+                    }
+
+                    if includeSkills {
+                        group.enter()
+                        DispatchQueue.global(qos: .utility).async { [weak self] in
+                            defer { group.leave() }
+                            guard let self else { return }
+                            do {
+                                let marketSummary: OpenClawSkillsMarketSummary = try self.performManagerRequest(path: skillsMarketPath)
+                                skillsMarketBox.value = .success(marketSummary)
+                            } catch {
+                                skillsMarketBox.value = .failure(error)
+                            }
+                        }
+
+                        group.enter()
+                        DispatchQueue.global(qos: .utility).async { [weak self] in
+                            defer { group.leave() }
+                            guard let self else { return }
+                            do {
+                                let inventory: OpenClawSkillsInventory = try self.performManagerRequest(path: skillsInventoryPath)
+                                skillsInventoryBox.value = .success(inventory)
+                            } catch {
+                                skillsInventoryBox.value = .failure(error)
+                            }
+                        }
+                    }
+                }
+
                 group.wait()
 
                 if !includeManager {
+                    if includeSkills {
+                        guard let skillsSummaryResult = skillsSummaryBox.value else {
+                            throw NSError(domain: self.appName, code: 30, userInfo: [NSLocalizedDescriptionKey: "本地 skills 摘要为空"])
+                        }
+                        guard let skillsConfigResult = skillsConfigBox.value else {
+                            throw NSError(domain: self.appName, code: 31, userInfo: [NSLocalizedDescriptionKey: "本地 skills 配置摘要为空"])
+                        }
+                        guard let marketResult = skillsMarketBox.value else {
+                            throw NSError(domain: self.appName, code: 32, userInfo: [NSLocalizedDescriptionKey: "技能市场摘要为空"])
+                        }
+                        guard let inventoryResult = skillsInventoryBox.value else {
+                            throw NSError(domain: self.appName, code: 33, userInfo: [NSLocalizedDescriptionKey: "已安装技能库存为空"])
+                        }
+
+                        let skillsSummary = try skillsSummaryResult.get()
+                        let skillsConfig = try skillsConfigResult.get()
+                        let marketSummary = try marketResult.get()
+                        let inventory = try inventoryResult.get()
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.applySkillsRefreshedState(
+                                skillsSummary: skillsSummary,
+                                skillsConfig: skillsConfig,
+                                marketSummary: marketSummary,
+                                inventory: inventory
+                            )
+                            if let busyKey {
+                                self.store.setBusy(busyKey, active: false)
+                            }
+                        }
+                        return
+                    }
+
+                    if includeSettings {
+                        guard let skillsSummaryResult = skillsSummaryBox.value else {
+                            throw NSError(domain: self.appName, code: 28, userInfo: [NSLocalizedDescriptionKey: "本地 skills 摘要为空"])
+                        }
+                        guard let skillsConfigResult = skillsConfigBox.value else {
+                            throw NSError(domain: self.appName, code: 29, userInfo: [NSLocalizedDescriptionKey: "本地 skills 配置摘要为空"])
+                        }
+
+                        let skillsSummary = try skillsSummaryResult.get()
+                        let skillsConfig = try skillsConfigResult.get()
+                        let profileConfigDocument = try? profileConfigBox.value?.get()
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            self.applySettingsRefreshedState(
+                                profileConfigDocument: profileConfigDocument,
+                                skillsSummary: skillsSummary,
+                                skillsConfig: skillsConfig
+                            )
+                            if let busyKey {
+                                self.store.setBusy(busyKey, active: false)
+                            }
+                        }
+                        return
+                    }
+
                     if includeMachine {
                         guard let machineResult = machineBox.value else {
                             throw NSError(domain: self.appName, code: 26, userInfo: [NSLocalizedDescriptionKey: "本地机器监控摘要为空"])
@@ -715,9 +951,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                         }
                         return
                     }
+                    if scope == .settingsOnly {
+                        self.latestOpenClawProfileConfigDocument = nil
+                        self.latestOpenClawSkillsSummary = nil
+                        self.latestOpenClawSkillsConfig = nil
+                        self.store.applyRefreshError(error.localizedDescription, silent: silentForStore)
+                        if let busyKey {
+                            self.store.setBusy(busyKey, active: false)
+                        }
+                        if showErrorAlerts {
+                            self.showError(error)
+                        }
+                        return
+                    }
+                    if scope == .skillsOnly {
+                        self.latestOpenClawSkillsSummary = nil
+                        self.latestOpenClawSkillsConfig = nil
+                        self.latestSkillsMarketSummary = nil
+                        self.latestSkillsInventory = nil
+                        self.store.applyRefreshError(error.localizedDescription, silent: silentForStore)
+                        if let busyKey {
+                            self.store.setBusy(busyKey, active: false)
+                        }
+                        if showErrorAlerts {
+                            self.showError(error)
+                        }
+                        return
+                    }
                     self.latestManagerSummary = nil
                     self.latestSupportSummary = nil
                     self.latestMachineSummary = nil
+                    self.latestOpenClawProfileConfigDocument = nil
+                    self.latestOpenClawSkillsSummary = nil
+                    self.latestOpenClawSkillsConfig = nil
+                    self.latestSkillsMarketSummary = nil
+                    self.latestSkillsInventory = nil
                     self.pushLocalSnapshotToStore()
                     self.rebuildStatusItemMenu()
                     self.rebuildMenu()
@@ -733,7 +1001,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }
     }
 
-    private func performManagerRequest<T: Decodable & Sendable>(path: String, method: String = "GET", body: Data? = nil) throws -> T {
+    private func performManagerRequest<T: Decodable & Sendable>(
+        path: String,
+        method: String = "GET",
+        body: Data? = nil,
+        timeout: TimeInterval = 8
+    ) throws -> T {
         guard let currentApiPort else {
             throw NSError(domain: appName, code: 20, userInfo: [NSLocalizedDescriptionKey: "本地 API 端口不可用"])
         }
@@ -745,7 +1018,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = 8
+        request.timeoutInterval = timeout
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -782,7 +1055,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             }
         }.resume()
 
-        if semaphore.wait(timeout: .now() + 10) == .timedOut {
+        if semaphore.wait(timeout: .now() + timeout + 2) == .timedOut {
             throw NSError(domain: appName, code: 23, userInfo: [NSLocalizedDescriptionKey: "本地 API 请求超时"])
         }
 
@@ -896,6 +1169,74 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
+    private func validateProfileConfig(_ profileName: String) {
+        performBackgroundUIRequest(
+            key: "profile-config:validate:\(profileName)",
+            errorTitle: "配置校验失败",
+            request: {
+                try self.performManagerRequest(
+                    path: "/api/openclaw/profiles/\(profileName)/config/validate",
+                    method: "POST"
+                ) as OpenClawProfileConfigValidationResult
+            },
+            onSuccess: { result in
+                self.store.applyProfileConfigValidation(result)
+                self.refreshManagerData(scope: .settingsOnly, silentForStore: true)
+                if result.valid {
+                    self.store.showNotice(.success, title: "\(profileName) 配置校验通过", detail: result.detail)
+                } else {
+                    self.store.showNotice(.error, title: "\(profileName) 配置未通过校验", detail: result.detail)
+                }
+            }
+        )
+    }
+
+    @MainActor
+    private func previewProfileConfig(_ profileName: String, request: OpenClawProfileConfigEditRequest) {
+        performBackgroundUIRequest(
+            key: "profile-config:preview:\(profileName)",
+            errorTitle: "预览配置失败",
+            request: {
+                let body = try JSONEncoder().encode(request)
+                return try self.performManagerRequest(
+                    path: "/api/openclaw/profiles/\(profileName)/config/preview",
+                    method: "POST",
+                    body: body
+                ) as OpenClawProfileConfigPreviewResult
+            },
+            onSuccess: { result in
+                self.store.selectedSection = .profiles
+                self.store.applyProfileConfigPreview(result)
+                self.store.showNotice(.success, title: "已生成变更预览", detail: result.message)
+            }
+        )
+    }
+
+    @MainActor
+    private func applyProfileConfig(_ profileName: String, request: OpenClawProfileConfigEditRequest) {
+        performBackgroundUIRequest(
+            key: "profile-config:apply:\(profileName)",
+            errorTitle: "应用配置失败",
+            request: {
+                let body = try JSONEncoder().encode(request)
+                return try self.performManagerRequest(
+                    path: "/api/openclaw/profiles/\(profileName)/config/apply",
+                    method: "POST",
+                    body: body
+                ) as OpenClawProfileConfigApplyResult
+            },
+            onSuccess: { result in
+                self.store.selectedSection = .profiles
+                self.store.applyProfileConfigValidation(result.validation)
+                self.store.clearProfileConfigPreview()
+                self.store.showNotice(.success, title: "配置已应用", detail: result.message)
+                self.refreshManagerData(scope: .managerOnly, silentForStore: true)
+                self.refreshManagerData(scope: .settingsOnly, silentForStore: false)
+            }
+        )
+    }
+
+    @MainActor
     private func saveAutomation(_ patch: AutomationSettingsPatch) {
         performBackgroundUIRequest(key: "automation:save", errorTitle: "保存自动切换设置失败", request: {
             let body = try JSONEncoder().encode(patch)
@@ -903,6 +1244,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         }, onSuccess: { summary in
             self.applyRefreshedState(summary: summary, supportSummary: self.latestSupportSummary, machineSummary: self.latestMachineSummary)
             self.store.showNotice(.success, title: "自动化设置已保存")
+        })
+    }
+
+    @MainActor
+    private func saveSkillsConfig(_ patch: OpenClawSkillsConfigPatch) {
+        performBackgroundUIRequest(key: "skills:config:save", errorTitle: "保存 Skills 配置失败", request: {
+            let body = try JSONEncoder().encode(patch)
+            return try self.performManagerRequest(path: "/api/openclaw/skills/config", method: "PATCH", body: body) as OpenClawSkillsConfigMutationResult
+        }, onSuccess: { result in
+            self.store.selectedSection = .settings
+            self.store.showNotice(.success, title: "Skills 配置已保存", detail: result.message)
+            self.refreshManagerData(scope: .settingsOnly, silentForStore: false)
         })
     }
 
@@ -948,6 +1301,140 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
                 self.store.showNotice(.success, title: "诊断操作已执行", detail: detail)
             }
         )
+    }
+
+    @MainActor
+    private func loadSkillMarketDetail(_ slug: String) {
+        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        performBackgroundUIRequest(key: "skill:detail:\(trimmed)", errorTitle: "读取技能详情失败", request: {
+            let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+            return try self.performManagerRequest(path: "/api/openclaw/skills/market/\(encoded)") as OpenClawSkillMarketDetail
+        }, onSuccess: { detail in
+            self.store.applySkillMarketDetail(detail)
+        })
+    }
+
+    @MainActor
+    private func installSkill(_ slug: String) {
+        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        performBackgroundUIRequest(key: "skill:install:\(trimmed)", errorTitle: "安装技能失败", request: {
+            let body = try JSONEncoder().encode(["slug": trimmed])
+            return try self.performManagerRequest(
+                path: "/api/openclaw/skills/install",
+                method: "POST",
+                body: body,
+                timeout: 95
+            ) as OpenClawSkillMutationResult
+        }, onSuccess: { result in
+            self.store.selectedSection = .skills
+            self.store.showNotice(.success, title: "技能已安装", detail: result.message)
+            self.refreshManagerData(scope: .skillsOnly, silentForStore: false)
+        })
+    }
+
+    @MainActor
+    private func uninstallSkill(_ slug: String) {
+        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        performBackgroundUIRequest(key: "skill:uninstall:\(trimmed)", errorTitle: "卸载技能失败", request: {
+            let body = try JSONEncoder().encode(["slug": trimmed])
+            return try self.performManagerRequest(path: "/api/openclaw/skills/uninstall", method: "POST", body: body) as OpenClawSkillMutationResult
+        }, onSuccess: { result in
+            self.store.selectedSection = .skills
+            self.store.showNotice(.success, title: "技能已卸载", detail: result.message)
+            self.refreshManagerData(scope: .skillsOnly, silentForStore: false)
+        })
+    }
+
+    @MainActor
+    private func setSkillEnabled(_ slug: String, enabled: Bool, bundled: Bool) {
+        let trimmed = slug.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let action = enabled ? "enable" : "disable"
+        let title = enabled ? "启用技能失败" : "停用技能失败"
+        performBackgroundUIRequest(key: "skill:\(action):\(trimmed)", errorTitle: title, request: {
+            let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmed
+            let body = try JSONEncoder().encode(["bundled": bundled])
+            return try self.performManagerRequest(
+                path: "/api/openclaw/skills/\(encoded)/\(action)",
+                method: "POST",
+                body: body
+            ) as OpenClawSkillMutationResult
+        }, onSuccess: { result in
+            self.store.selectedSection = .skills
+            self.store.showNotice(.success, title: enabled ? "技能已更新" : "技能已停用", detail: result.message)
+            self.refreshManagerData(scope: .skillsOnly, silentForStore: false)
+        })
+    }
+
+    @MainActor
+    private func selectSkillsExtraDir() {
+        let initialPath = store.openClawSkillsConfig?.extraDirs.last ?? currentConfig.openclawHomeDir
+        selectDirectory(title: "选择要挂载的 Skills 目录", initialPath: initialPath) { [weak self] path in
+            self?.addSkillsExtraDir(path)
+        }
+    }
+
+    @MainActor
+    private func addSkillsExtraDir(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        performBackgroundUIRequest(key: "skills:add-extra-dir", errorTitle: "新增挂载目录失败", request: {
+            let body = try JSONEncoder().encode(OpenClawSkillsConfigPatch(
+                addExtraDir: trimmed,
+                removeExtraDir: nil,
+                watch: nil,
+                watchDebounceMs: nil,
+                installPreferBrew: nil,
+                clearInstallPreferBrew: nil,
+                installNodeManager: nil,
+                clearInstallNodeManager: nil
+            ))
+            return try self.performManagerRequest(
+                path: "/api/openclaw/skills/config",
+                method: "PATCH",
+                body: body
+            ) as OpenClawSkillsConfigMutationResult
+        }, onSuccess: { result in
+            self.store.selectedSection = .settings
+            self.store.showNotice(.success, title: "挂载目录已加入", detail: result.message)
+            self.refreshManagerData(scope: .settingsOnly, silentForStore: false)
+        })
+    }
+
+    @MainActor
+    private func removeSkillsExtraDir(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        performBackgroundUIRequest(key: "skills:remove-extra-dir:\(trimmed)", errorTitle: "移除挂载目录失败", request: {
+            let body = try JSONEncoder().encode(OpenClawSkillsConfigPatch(
+                addExtraDir: nil,
+                removeExtraDir: trimmed,
+                watch: nil,
+                watchDebounceMs: nil,
+                installPreferBrew: nil,
+                clearInstallPreferBrew: nil,
+                installNodeManager: nil,
+                clearInstallNodeManager: nil
+            ))
+            return try self.performManagerRequest(
+                path: "/api/openclaw/skills/config",
+                method: "PATCH",
+                body: body
+            ) as OpenClawSkillsConfigMutationResult
+        }, onSuccess: { result in
+            self.store.selectedSection = .settings
+            self.store.showNotice(.success, title: "挂载目录已移除", detail: result.message)
+            self.refreshManagerData(scope: .settingsOnly, silentForStore: false)
+        })
     }
 
     @MainActor
@@ -1160,7 +1647,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
     @MainActor
     @objc private func selectOpenClawRoot(_ sender: Any?) {
-        selectDirectory(title: "选择 OpenClaw 根目录", target: .openclaw)
+        selectDirectory(title: "选择 OpenClaw 根目录", initialPath: currentConfig.openclawHomeDir) { [weak self] path in
+            self?.updateConfig(target: .openclaw, value: path, reason: "选择 OpenClaw 根目录")
+        }
     }
 
     @MainActor
@@ -1170,7 +1659,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
     @MainActor
     @objc private func selectCodexRoot(_ sender: Any?) {
-        selectDirectory(title: "选择可选 Codex 根目录", target: .codex)
+        selectDirectory(title: "选择可选 Codex 根目录", initialPath: currentConfig.codexHomeDir) { [weak self] path in
+            self?.updateConfig(target: .codex, value: path, reason: "选择可选 Codex 根目录")
+        }
     }
 
     @MainActor
@@ -1382,15 +1873,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     }
 
     @MainActor
-    private func selectDirectory(title: String, target: RuntimeRootTarget) {
-        let currentPath: String
-        switch target {
-        case .openclaw:
-            currentPath = currentConfig.openclawHomeDir
-        case .codex:
-            currentPath = currentConfig.codexHomeDir
-        }
-
+    private func selectDirectory(title: String, initialPath: String, onPick: @escaping @MainActor (String) -> Void) {
         requireMainThread()
         let panel = NSOpenPanel()
         panel.title = title
@@ -1398,13 +1881,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: currentPath)
+        panel.directoryURL = URL(fileURLWithPath: (initialPath as NSString).expandingTildeInPath)
 
         guard panel.runModal() == .OK, let url = panel.url else {
             return
         }
 
-        updateConfig(target: target, value: url.path, reason: title)
+        onPick(url.path)
     }
 
     @MainActor

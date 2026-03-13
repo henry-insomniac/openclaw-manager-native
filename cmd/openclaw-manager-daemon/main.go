@@ -50,6 +50,7 @@ const (
 	supportEnvironmentCacheTTL  = 2 * time.Minute
 	supportMaintenanceCacheTTL  = 2 * time.Minute
 	machineSummaryCacheTTL      = 3 * time.Second
+	skillsSummaryCacheTTL       = 20 * time.Second
 	oauthTimeout                = 10 * time.Minute
 	legacyDefaultPollIntervalMs = 60_000
 	minProbeIntervalMs          = 30_000
@@ -116,6 +117,9 @@ type App struct {
 	supportEnvironmentCache  *cachedSupportEnvironment
 	supportMaintenanceCache  *cachedSupportMaintenance
 	machineSummaryCache      *cachedMachineSummary
+	skillsSummaryCache       *cachedOpenClawSkillsSummary
+	skillsMarketCache        *cachedOpenClawSkillsMarketSummary
+	skillsMarketDetailCache  map[string]cachedOpenClawSkillMarketDetail
 	supportSummaryRefreshing bool
 	machineSummaryRefreshing bool
 	lastNetworkSample        *machineNetworkCounters
@@ -153,6 +157,11 @@ type cachedSupportMaintenance struct {
 
 type cachedMachineSummary struct {
 	Summary   MachineSummary
+	FetchedAt time.Time
+}
+
+type cachedOpenClawSkillsSummary struct {
+	Summary   OpenClawSkillsSummary
 	FetchedAt time.Time
 }
 
@@ -603,6 +612,28 @@ type OpenClawConfigFile struct {
 			} `json:"model"`
 		} `json:"defaults"`
 	} `json:"agents"`
+	Skills OpenClawSkillsConfigFile `json:"skills"`
+}
+
+type OpenClawSkillsConfigFile struct {
+	AllowBundled []string `json:"allowBundled,omitempty"`
+	Load         struct {
+		ExtraDirs       []string `json:"extraDirs,omitempty"`
+		Watch           *bool    `json:"watch,omitempty"`
+		WatchDebounceMs *int     `json:"watchDebounceMs,omitempty"`
+	} `json:"load"`
+	Install struct {
+		PreferBrew  *bool   `json:"preferBrew,omitempty"`
+		NodeManager *string `json:"nodeManager,omitempty"`
+	} `json:"install"`
+	Entries map[string]OpenClawSkillConfigEntryFile `json:"entries,omitempty"`
+}
+
+type OpenClawSkillConfigEntryFile struct {
+	Enabled *bool          `json:"enabled,omitempty"`
+	Env     map[string]any `json:"env,omitempty"`
+	APIKey  any            `json:"apiKey,omitempty"`
+	Config  map[string]any `json:"config,omitempty"`
 }
 
 type OpenClawAuthProfileConfig struct {
@@ -615,6 +646,131 @@ type OpenClawConfigSnapshot struct {
 	PrimaryModelID        *string
 	ConfiguredProviderIDs []string
 	AuthModes             map[string]string
+}
+
+type OpenClawProfileConfigSummary struct {
+	CollectedAt           string            `json:"collectedAt"`
+	ProfileName           string            `json:"profileName"`
+	StateDir              string            `json:"stateDir"`
+	ConfigPath            string            `json:"configPath"`
+	AuthStorePath         string            `json:"authStorePath"`
+	ConfigExists          bool              `json:"configExists"`
+	AuthStoreExists       bool              `json:"authStoreExists"`
+	ConfigValid           bool              `json:"configValid"`
+	AuthStoreValid        bool              `json:"authStoreValid"`
+	ConfigDetail          string            `json:"configDetail"`
+	AuthStoreDetail       string            `json:"authStoreDetail"`
+	PrimaryProviderID     *string           `json:"primaryProviderId,omitempty"`
+	PrimaryModelID        *string           `json:"primaryModelId,omitempty"`
+	ConfiguredProviderIDs []string          `json:"configuredProviderIds"`
+	AuthModes             map[string]string `json:"authModes"`
+	LoginKind             *string           `json:"loginKind,omitempty"`
+	CompanionRuntimeKind  *string           `json:"companionRuntimeKind,omitempty"`
+	ConfigUpdatedAt       *string           `json:"configUpdatedAt,omitempty"`
+	AuthStoreUpdatedAt    *string           `json:"authStoreUpdatedAt,omitempty"`
+}
+
+type OpenClawProfileConfigDocument struct {
+	Summary       OpenClawProfileConfigSummary `json:"summary"`
+	RawConfig     *string                      `json:"rawConfig,omitempty"`
+	RawAuthStore  *string                      `json:"rawAuthStore,omitempty"`
+	ConfigHash    *string                      `json:"configHash,omitempty"`
+	AuthStoreHash *string                      `json:"authStoreHash,omitempty"`
+}
+
+type OpenClawProfileConfigValidationResult struct {
+	CollectedAt string  `json:"collectedAt"`
+	ProfileName string  `json:"profileName"`
+	ConfigPath  string  `json:"configPath"`
+	Valid       bool    `json:"valid"`
+	Detail      string  `json:"detail"`
+	Output      *string `json:"output,omitempty"`
+}
+
+type OpenClawSkillConfigEntrySummary struct {
+	Key       string `json:"key"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+	HasEnv    bool   `json:"hasEnv"`
+	HasAPIKey bool   `json:"hasApiKey"`
+}
+
+type OpenClawSkillsConfigSummary struct {
+	CollectedAt        string                            `json:"collectedAt"`
+	ConfigPath         string                            `json:"configPath"`
+	Exists             bool                              `json:"exists"`
+	Valid              bool                              `json:"valid"`
+	Detail             string                            `json:"detail"`
+	AllowBundled       []string                          `json:"allowBundled"`
+	ExtraDirs          []string                          `json:"extraDirs"`
+	Watch              *bool                             `json:"watch,omitempty"`
+	WatchDebounceMs    *int                              `json:"watchDebounceMs,omitempty"`
+	InstallPreferBrew  *bool                             `json:"installPreferBrew,omitempty"`
+	InstallNodeManager *string                           `json:"installNodeManager,omitempty"`
+	EntryCount         int                               `json:"entryCount"`
+	UpdatedAt          *string                           `json:"updatedAt,omitempty"`
+	Entries            []OpenClawSkillConfigEntrySummary `json:"entries"`
+}
+
+type OpenClawSkillMissingRequirements struct {
+	Bins    []string `json:"bins"`
+	AnyBins []string `json:"anyBins"`
+	Env     []string `json:"env"`
+	Config  []string `json:"config"`
+	OS      []string `json:"os"`
+}
+
+type OpenClawSkillSummary struct {
+	Key                string                           `json:"key"`
+	Name               string                           `json:"name"`
+	Description        string                           `json:"description"`
+	Emoji              *string                          `json:"emoji,omitempty"`
+	Source             string                           `json:"source"`
+	Bundled            bool                             `json:"bundled"`
+	Status             string                           `json:"status"`
+	Enabled            bool                             `json:"enabled"`
+	Eligible           bool                             `json:"eligible"`
+	BlockedByAllowlist bool                             `json:"blockedByAllowlist"`
+	Homepage           *string                          `json:"homepage,omitempty"`
+	PrimaryEnv         *string                          `json:"primaryEnv,omitempty"`
+	ConfigConfigured   bool                             `json:"configConfigured"`
+	ConfigEnabled      *bool                            `json:"configEnabled,omitempty"`
+	HasEnvConfig       bool                             `json:"hasEnvConfig"`
+	HasAPIKeyConfig    bool                             `json:"hasApiKeyConfig"`
+	Missing            OpenClawSkillMissingRequirements `json:"missing"`
+}
+
+type OpenClawSkillsSummary struct {
+	CollectedAt      string                 `json:"collectedAt"`
+	ConfigPath       string                 `json:"configPath"`
+	WorkspaceDir     *string                `json:"workspaceDir,omitempty"`
+	ManagedSkillsDir *string                `json:"managedSkillsDir,omitempty"`
+	TotalSkills      int                    `json:"totalSkills"`
+	ReadySkills      int                    `json:"readySkills"`
+	DisabledSkills   int                    `json:"disabledSkills"`
+	BlockedSkills    int                    `json:"blockedSkills"`
+	MissingSkills    int                    `json:"missingSkills"`
+	ConfiguredSkills int                    `json:"configuredSkills"`
+	Skills           []OpenClawSkillSummary `json:"skills"`
+}
+
+type openClawSkillsListPayload struct {
+	WorkspaceDir     string                         `json:"workspaceDir"`
+	ManagedSkillsDir string                         `json:"managedSkillsDir"`
+	Skills           []openClawSkillsListSkillEntry `json:"skills"`
+}
+
+type openClawSkillsListSkillEntry struct {
+	Name               string                           `json:"name"`
+	Description        string                           `json:"description"`
+	Emoji              string                           `json:"emoji"`
+	Eligible           bool                             `json:"eligible"`
+	Disabled           bool                             `json:"disabled"`
+	BlockedByAllowlist bool                             `json:"blockedByAllowlist"`
+	Source             string                           `json:"source"`
+	Bundled            bool                             `json:"bundled"`
+	Homepage           string                           `json:"homepage"`
+	PrimaryEnv         string                           `json:"primaryEnv"`
+	Missing            OpenClawSkillMissingRequirements `json:"missing"`
 }
 
 type OAuthCredential struct {
@@ -777,6 +933,7 @@ func newApp() (*App, error) {
 		loginFlowIDsByState:     map[string]string{},
 		usageCache:              map[string]cachedUsageSnapshot{},
 		stateDirCache:           map[string]string{},
+		skillsMarketDetailCache: map[string]cachedOpenClawSkillMarketDetail{},
 	}
 	if app.authOpenMode == "" {
 		app.authOpenMode = "auto"
@@ -789,6 +946,21 @@ func (app *App) start() error {
 	mux.HandleFunc("GET /api/health", app.handleHealth)
 	mux.HandleFunc("GET /api/openclaw/manager", app.handleManagerSummary)
 	mux.HandleFunc("GET /api/openclaw/system", app.handleRuntimeOverview)
+	mux.HandleFunc("GET /api/openclaw/profiles/{profileName}/config/summary", app.handleOpenClawProfileConfigSummary)
+	mux.HandleFunc("GET /api/openclaw/profiles/{profileName}/config/document", app.handleOpenClawProfileConfigDocument)
+	mux.HandleFunc("POST /api/openclaw/profiles/{profileName}/config/validate", app.handleValidateOpenClawProfileConfig)
+	mux.HandleFunc("POST /api/openclaw/profiles/{profileName}/config/preview", app.handlePreviewOpenClawProfileConfig)
+	mux.HandleFunc("POST /api/openclaw/profiles/{profileName}/config/apply", app.handleApplyOpenClawProfileConfig)
+	mux.HandleFunc("GET /api/openclaw/skills", app.handleOpenClawSkillsSummary)
+	mux.HandleFunc("GET /api/openclaw/skills/config", app.handleOpenClawSkillsConfig)
+	mux.HandleFunc("PATCH /api/openclaw/skills/config", app.handlePatchOpenClawSkillsConfig)
+	mux.HandleFunc("GET /api/openclaw/skills/market", app.handleOpenClawSkillsMarket)
+	mux.HandleFunc("GET /api/openclaw/skills/market/{slug}", app.handleOpenClawSkillMarketDetail)
+	mux.HandleFunc("GET /api/openclaw/skills/inventory", app.handleOpenClawSkillsInventory)
+	mux.HandleFunc("POST /api/openclaw/skills/{skillKey}/enable", app.handleEnableOpenClawSkill)
+	mux.HandleFunc("POST /api/openclaw/skills/{skillKey}/disable", app.handleDisableOpenClawSkill)
+	mux.HandleFunc("POST /api/openclaw/skills/install", app.handleInstallOpenClawSkill)
+	mux.HandleFunc("POST /api/openclaw/skills/uninstall", app.handleUninstallOpenClawSkill)
 	mux.HandleFunc("GET /api/machine/summary", app.handleMachineSummary)
 	mux.HandleFunc("PATCH /api/openclaw/settings", app.handleUpdateSettings)
 	mux.HandleFunc("POST /api/openclaw/automation/tick", app.handleAutomationTick)
@@ -851,6 +1023,51 @@ func (app *App) handleRuntimeOverview(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, overview)
+}
+
+func (app *App) handleOpenClawProfileConfigSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := app.readOpenClawProfileConfigSummary(r.PathValue("profileName"))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (app *App) handleOpenClawProfileConfigDocument(w http.ResponseWriter, r *http.Request) {
+	document, err := app.readOpenClawProfileConfigDocument(r.PathValue("profileName"))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, document)
+}
+
+func (app *App) handleValidateOpenClawProfileConfig(w http.ResponseWriter, r *http.Request) {
+	result, err := app.validateOpenClawProfileConfig(r.PathValue("profileName"))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (app *App) handleOpenClawSkillsSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := app.buildOpenClawSkillsSummary(r.URL.Query().Get("fresh") == "1")
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (app *App) handleOpenClawSkillsConfig(w http.ResponseWriter, _ *http.Request) {
+	summary, err := app.readOpenClawSkillsConfigSummary()
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (app *App) handleMachineSummary(w http.ResponseWriter, r *http.Request) {
@@ -1986,6 +2203,282 @@ func (app *App) resolveConfigPath(profileName string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(stateDir, "openclaw.json"), nil
+}
+
+func (app *App) readOpenClawProfileConfigSummary(profileName string) (OpenClawProfileConfigSummary, error) {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return OpenClawProfileConfigSummary{}, errors.New("profile name is required")
+	}
+
+	stateDir, err := app.resolveStateDir(profileName)
+	if err != nil {
+		return OpenClawProfileConfigSummary{}, err
+	}
+	configPath, err := app.resolveConfigPath(profileName)
+	if err != nil {
+		return OpenClawProfileConfigSummary{}, err
+	}
+	authStorePath, err := app.resolveAuthStorePath(profileName)
+	if err != nil {
+		return OpenClawProfileConfigSummary{}, err
+	}
+
+	configExists, configValid, configDetail, _, configUpdatedAt := readJSONFileStatus(configPath)
+	authStoreExists, authStoreValid, authStoreDetail, _, authStoreUpdatedAt := readJSONFileStatus(authStorePath)
+	config := readOpenClawConfigSnapshot(configPath)
+	codex := app.readCodexMetadata(profileName)
+
+	return OpenClawProfileConfigSummary{
+		CollectedAt:           nowISO(),
+		ProfileName:           profileName,
+		StateDir:              stateDir,
+		ConfigPath:            configPath,
+		AuthStorePath:         authStorePath,
+		ConfigExists:          configExists,
+		AuthStoreExists:       authStoreExists,
+		ConfigValid:           configValid,
+		AuthStoreValid:        authStoreValid,
+		ConfigDetail:          configDetail,
+		AuthStoreDetail:       authStoreDetail,
+		PrimaryProviderID:     config.PrimaryProviderID,
+		PrimaryModelID:        config.PrimaryModelID,
+		ConfiguredProviderIDs: append([]string{}, config.ConfiguredProviderIDs...),
+		AuthModes:             cloneStringMap(config.AuthModes),
+		LoginKind:             profileLoginKind(config),
+		CompanionRuntimeKind:  companionRuntimeKind(config, codex),
+		ConfigUpdatedAt:       configUpdatedAt,
+		AuthStoreUpdatedAt:    authStoreUpdatedAt,
+	}, nil
+}
+
+func (app *App) readOpenClawProfileConfigDocument(profileName string) (OpenClawProfileConfigDocument, error) {
+	summary, err := app.readOpenClawProfileConfigSummary(profileName)
+	if err != nil {
+		return OpenClawProfileConfigDocument{}, err
+	}
+	_, _, _, rawConfig, _ := readJSONFileStatus(summary.ConfigPath)
+	_, _, _, rawAuthStore, _ := readJSONFileStatus(summary.AuthStorePath)
+
+	return OpenClawProfileConfigDocument{
+		Summary:       summary,
+		RawConfig:     rawConfig,
+		RawAuthStore:  rawAuthStore,
+		ConfigHash:    hashText(rawConfig),
+		AuthStoreHash: hashText(rawAuthStore),
+	}, nil
+}
+
+func (app *App) validateOpenClawProfileConfig(rawProfileName string) (OpenClawProfileConfigValidationResult, error) {
+	app.opMu.Lock()
+	defer app.opMu.Unlock()
+	return app.validateOpenClawProfileConfigUnlocked(rawProfileName)
+}
+
+func (app *App) validateOpenClawProfileConfigUnlocked(rawProfileName string) (OpenClawProfileConfigValidationResult, error) {
+	profileName, err := normalizeProfileName(rawProfileName, true)
+	if err != nil {
+		return OpenClawProfileConfigValidationResult{}, err
+	}
+	summary, err := app.readOpenClawProfileConfigSummary(profileName)
+	if err != nil {
+		return OpenClawProfileConfigValidationResult{}, err
+	}
+
+	openclawBin := app.resolveOpenClawBin()
+	commandResult := runCommand(openclawBin, []string{"--profile", profileName, "config", "validate"}, commandTimeout)
+	stdout := stripOpenClawCommandNoise(commandResult.Stdout)
+	stderr := stripOpenClawCommandNoise(commandResult.Stderr)
+	output := cleanOutput(stdout, stderr)
+	configPath := expandUserPath(prefixedLine(stdout, "Config valid:"), app.homeDir)
+	if strings.TrimSpace(configPath) == "" {
+		configPath = summary.ConfigPath
+	}
+
+	if commandResult.OK {
+		return OpenClawProfileConfigValidationResult{
+			CollectedAt: nowISO(),
+			ProfileName: profileName,
+			ConfigPath:  configPath,
+			Valid:       true,
+			Detail:      "配置有效",
+		}, nil
+	}
+
+	return OpenClawProfileConfigValidationResult{
+		CollectedAt: nowISO(),
+		ProfileName: profileName,
+		ConfigPath:  configPath,
+		Valid:       false,
+		Detail:      firstNonEmpty(firstNonEmptyLine(derefString(output)), "配置校验失败"),
+		Output:      output,
+	}, nil
+}
+
+func (app *App) readOpenClawSkillsConfigSummary() (OpenClawSkillsConfigSummary, error) {
+	configPath, err := app.resolveConfigPath(defaultProfileName)
+	if err != nil {
+		return OpenClawSkillsConfigSummary{}, err
+	}
+
+	exists, valid, detail, _, updatedAt := readJSONFileStatus(configPath)
+	summary := OpenClawSkillsConfigSummary{
+		CollectedAt:  nowISO(),
+		ConfigPath:   configPath,
+		Exists:       exists,
+		Valid:        valid,
+		Detail:       detail,
+		AllowBundled: []string{},
+		ExtraDirs:    []string{},
+		Entries:      []OpenClawSkillConfigEntrySummary{},
+		UpdatedAt:    updatedAt,
+	}
+	if !exists || !valid {
+		return summary, nil
+	}
+
+	file := readJSONFile(configPath, OpenClawConfigFile{})
+	summary.AllowBundled = compactStrings(file.Skills.AllowBundled)
+	summary.ExtraDirs = compactStrings(file.Skills.Load.ExtraDirs)
+	summary.Watch = file.Skills.Load.Watch
+	summary.WatchDebounceMs = file.Skills.Load.WatchDebounceMs
+	summary.InstallPreferBrew = file.Skills.Install.PreferBrew
+	summary.InstallNodeManager = file.Skills.Install.NodeManager
+
+	keys := make([]string, 0, len(file.Skills.Entries))
+	for key := range file.Skills.Entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	summary.EntryCount = len(keys)
+	for _, key := range keys {
+		entry := file.Skills.Entries[key]
+		envKeys := make([]string, 0, len(entry.Env))
+		for envKey := range entry.Env {
+			envKeys = append(envKeys, envKey)
+		}
+		sort.Strings(envKeys)
+		summary.Entries = append(summary.Entries, OpenClawSkillConfigEntrySummary{
+			Key:       key,
+			Enabled:   entry.Enabled,
+			HasEnv:    len(envKeys) > 0,
+			HasAPIKey: entry.APIKey != nil,
+		})
+	}
+
+	return summary, nil
+}
+
+func (app *App) buildOpenClawSkillsSummary(fresh bool) (OpenClawSkillsSummary, error) {
+	if !fresh {
+		app.mu.Lock()
+		if app.skillsSummaryCache != nil && time.Since(app.skillsSummaryCache.FetchedAt) <= skillsSummaryCacheTTL {
+			cached := app.skillsSummaryCache.Summary
+			app.mu.Unlock()
+			return cached, nil
+		}
+		app.mu.Unlock()
+	}
+
+	configSummary, err := app.readOpenClawSkillsConfigSummary()
+	if err != nil {
+		return OpenClawSkillsSummary{}, err
+	}
+
+	openclawBin := app.resolveOpenClawBin()
+	result := runCommand(openclawBin, []string{"skills", "list", "--json"}, commandTimeout)
+	if !result.OK {
+		return OpenClawSkillsSummary{}, fmt.Errorf("openclaw skills list failed: %s", firstNonEmpty(derefString(cleanOutput(result.Stdout, result.Stderr)), "unknown error"))
+	}
+
+	payloadText := strings.TrimSpace(result.Stdout)
+	if payloadText == "" {
+		return OpenClawSkillsSummary{}, errors.New("openclaw skills list returned empty output")
+	}
+
+	var payload openClawSkillsListPayload
+	if err := json.Unmarshal([]byte(payloadText), &payload); err != nil {
+		return OpenClawSkillsSummary{}, fmt.Errorf("openclaw skills list returned invalid json: %w", err)
+	}
+	summary := summarizeOpenClawSkillsPayload(payload, configSummary, nowISO())
+
+	app.mu.Lock()
+	app.skillsSummaryCache = &cachedOpenClawSkillsSummary{
+		Summary:   summary,
+		FetchedAt: time.Now(),
+	}
+	app.mu.Unlock()
+
+	return summary, nil
+}
+
+func summarizeOpenClawSkillsPayload(payload openClawSkillsListPayload, configSummary OpenClawSkillsConfigSummary, collectedAt string) OpenClawSkillsSummary {
+	configEntries := make(map[string]OpenClawSkillConfigEntrySummary, len(configSummary.Entries))
+	for _, entry := range configSummary.Entries {
+		configEntries[entry.Key] = entry
+	}
+
+	skills := make([]OpenClawSkillSummary, 0, len(payload.Skills))
+	readyCount := 0
+	disabledCount := 0
+	blockedCount := 0
+	missingCount := 0
+	configuredCount := 0
+	for _, item := range payload.Skills {
+		entry, configured := configEntries[item.Name]
+		if configured {
+			configuredCount++
+		}
+
+		status := "missing_requirements"
+		switch {
+		case item.Disabled:
+			status = "disabled"
+			disabledCount++
+		case item.BlockedByAllowlist:
+			status = "blocked"
+			blockedCount++
+		case item.Eligible:
+			status = "ready"
+			readyCount++
+		default:
+			missingCount++
+		}
+
+		skills = append(skills, OpenClawSkillSummary{
+			Key:                item.Name,
+			Name:               item.Name,
+			Description:        item.Description,
+			Emoji:              nullableString(item.Emoji),
+			Source:             item.Source,
+			Bundled:            item.Bundled,
+			Status:             status,
+			Enabled:            !item.Disabled,
+			Eligible:           item.Eligible,
+			BlockedByAllowlist: item.BlockedByAllowlist,
+			Homepage:           nullableString(item.Homepage),
+			PrimaryEnv:         nullableString(item.PrimaryEnv),
+			ConfigConfigured:   configured,
+			ConfigEnabled:      entry.Enabled,
+			HasEnvConfig:       entry.HasEnv,
+			HasAPIKeyConfig:    entry.HasAPIKey,
+			Missing:            item.Missing,
+		})
+	}
+
+	return OpenClawSkillsSummary{
+		CollectedAt:      collectedAt,
+		ConfigPath:       configSummary.ConfigPath,
+		WorkspaceDir:     nullableString(payload.WorkspaceDir),
+		ManagedSkillsDir: nullableString(payload.ManagedSkillsDir),
+		TotalSkills:      len(skills),
+		ReadySkills:      readyCount,
+		DisabledSkills:   disabledCount,
+		BlockedSkills:    blockedCount,
+		MissingSkills:    missingCount,
+		ConfiguredSkills: configuredCount,
+		Skills:           skills,
+	}
 }
 
 func expectedStateDir(profileName, rootDir string) string {
@@ -3912,8 +4405,10 @@ func (app *App) getSupportMaintenance(fresh bool) SupportMaintenance {
 func (app *App) inspectOpenClawConfig(openclawBin string) SupportConfigCheck {
 	defaultPath := filepath.Join(app.defaultOpenClawState, "openclaw.json")
 	result := runCommand(openclawBin, []string{"config", "validate"}, commandTimeout)
+	stdout := stripOpenClawCommandNoise(result.Stdout)
+	stderr := stripOpenClawCommandNoise(result.Stderr)
 	if result.OK {
-		reportedPath := strings.TrimSpace(prefixedLine(result.Stdout, "Config valid:"))
+		reportedPath := strings.TrimSpace(prefixedLine(stdout, "Config valid:"))
 		if reportedPath == "" {
 			reportedPath = defaultPath
 		}
@@ -3926,7 +4421,7 @@ func (app *App) inspectOpenClawConfig(openclawBin string) SupportConfigCheck {
 		}
 	}
 
-	output := strings.TrimSpace(derefString(cleanOutput(result.Stdout, result.Stderr)))
+	output := strings.TrimSpace(derefString(cleanOutput(stdout, stderr)))
 	if output == "" {
 		output = "配置校验失败"
 	}
@@ -4009,7 +4504,7 @@ func (app *App) performSupportRepair(action string) (SupportRepairResult, error)
 }
 
 func summarizeSupportRepair(action string, result CommandResult, summary SupportSummary) (string, *string) {
-	rawOutput := cleanOutput(result.Stdout, result.Stderr)
+	rawOutput := cleanOutput(stripOpenClawCommandNoise(result.Stdout), stripOpenClawCommandNoise(result.Stderr))
 	if !result.OK {
 		return supportRepairFailureMessage(action), rawOutput
 	}
@@ -4688,6 +5183,47 @@ func readJSONFile[T any](targetPath string, fallback T) T {
 	return decoded
 }
 
+func readJSONFileStatus(targetPath string) (exists bool, valid bool, detail string, raw *string, updatedAt *string) {
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, false, "未找到文件", nil, nil
+		}
+		return false, false, "读取文件元数据失败", nil, nil
+	}
+
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		return true, false, "读取文件失败", nil, fileUpdatedAt(info)
+	}
+	text := string(data)
+	raw = &text
+	if len(bytes.TrimSpace(data)) == 0 {
+		return true, false, "文件为空", raw, fileUpdatedAt(info)
+	}
+	if !json.Valid(data) {
+		return true, false, "JSON 无效", raw, fileUpdatedAt(info)
+	}
+	return true, true, "配置可读", raw, fileUpdatedAt(info)
+}
+
+func fileUpdatedAt(info os.FileInfo) *string {
+	if info == nil {
+		return nil
+	}
+	timestamp := info.ModTime().UTC().Format(time.RFC3339)
+	return &timestamp
+}
+
+func hashText(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(*value))
+	hash := fmt.Sprintf("%x", sum[:])
+	return &hash
+}
+
 func writeJSONFile(targetPath string, value any) error {
 	if err := ensureDir(filepath.Dir(targetPath)); err != nil {
 		return err
@@ -4934,6 +5470,38 @@ func cleanOutput(stdout, stderr string) *string {
 		text = text[:4000] + "\n..."
 	}
 	return &text
+}
+
+func stripOpenClawCommandNoise(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+
+	lines := strings.Split(text, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == "":
+			continue
+		case strings.Contains(trimmed, "[DEP0040] DeprecationWarning: The `punycode` module is deprecated."):
+			continue
+		case strings.HasPrefix(trimmed, "(Use `node --trace-deprecation"):
+			continue
+		default:
+			filtered = append(filtered, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
+func firstNonEmptyLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func prefixedLine(text, prefix string) string {
@@ -5521,6 +6089,18 @@ func filterNonEmpty(values []string) []string {
 		if strings.TrimSpace(value) != "" {
 			out = append(out, value)
 		}
+	}
+	return out
+}
+
+func compactStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, value)
 	}
 	return out
 }

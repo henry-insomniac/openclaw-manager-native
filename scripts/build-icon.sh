@@ -13,8 +13,17 @@ ICNS_PATH="$ASSETS_DIR/OpenClawManager.icns"
 rm -rf "$ICONSET_DIR"
 mkdir -p "$ICONSET_DIR"
 
-qlmanage -t -s 1024 -o "$ASSETS_DIR" "$SVG_PATH" >/dev/null 2>&1
-mv "$PREVIEW_PNG" "$MASTER_PNG"
+if qlmanage -t -s 1024 -o "$ASSETS_DIR" "$SVG_PATH" >/dev/null 2>&1 && [ -f "$PREVIEW_PNG" ]; then
+  mv "$PREVIEW_PNG" "$MASTER_PNG"
+elif [ -f "$ICNS_PATH" ]; then
+  echo "跳过图标重建，继续使用现有 icns: $ICNS_PATH"
+  exit 0
+elif [ -f "$MASTER_PNG" ]; then
+  echo "复用现有主图: $MASTER_PNG"
+else
+  echo "无法生成图标：qlmanage 不可用，且缺少现有主图/图标缓存" >&2
+  exit 1
+fi
 
 create_icon() {
   local size="$1"
@@ -36,4 +45,3 @@ cp "$MASTER_PNG" "$ICONSET_DIR/icon_512x512@2x.png"
 iconutil -c icns -o "$ICNS_PATH" "$ICONSET_DIR"
 
 echo "图标已生成: $ICNS_PATH"
-

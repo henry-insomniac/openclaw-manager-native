@@ -20,6 +20,11 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit")
             ]
+        ),
+        .testTarget(
+            name: "OpenClawManagerNativeTests",
+            dependencies: ["OpenClawManagerNative"],
+            path: "Tests/OpenClawManagerNativeTests"
         )
     ]
 )

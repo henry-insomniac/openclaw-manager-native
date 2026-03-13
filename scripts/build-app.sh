@@ -97,7 +97,12 @@ sync_release_app_bundle() {
 bash "$ROOT_DIR/scripts/build-icon.sh"
 bash "$ROOT_DIR/scripts/sync-runtime.sh"
 
-swift build -c release --package-path "$ROOT_DIR"
+SWIFT_BUILD_ARGS=(-c release --package-path "$ROOT_DIR")
+if swift build --help 2>/dev/null | grep -q -- '--disable-sandbox'; then
+  SWIFT_BUILD_ARGS+=(--disable-sandbox)
+fi
+
+swift build "${SWIFT_BUILD_ARGS[@]}"
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$RESOURCES_DIR" "$SCRIPTS_DIR"
