@@ -59,6 +59,7 @@ type openClawProfileConfigEditPlan struct {
 	ConfigPath    string
 	BaseHash      string
 	NextHash      string
+	AppliesNow    bool
 	Changed       bool
 	Message       string
 	Changes       []OpenClawProfileConfigFieldChange
@@ -178,7 +179,7 @@ func (app *App) applyOpenClawProfileConfig(rawProfileName string, request OpenCl
 		ConfigPath:  plan.ConfigPath,
 		AppliedHash: plan.NextHash,
 		Changed:     true,
-		Message:     firstNonEmpty(plan.Message, "配置已应用。"),
+		Message:     openClawProfileConfigApplyMessage(plan.ProfileName, plan.AppliesNow),
 		Changes:     append([]OpenClawProfileConfigFieldChange(nil), plan.Changes...),
 		Validation:  validation,
 	}, nil
@@ -189,7 +190,8 @@ func (app *App) buildOpenClawProfileConfigEditPlan(rawProfileName string, reques
 	if err != nil {
 		return openClawProfileConfigEditPlan{}, err
 	}
-	if err := app.ensureActiveProfileConfigEditable(profileName); err != nil {
+	appliesNow, err := app.openClawProfileConfigAppliesNow(profileName)
+	if err != nil {
 		return openClawProfileConfigEditPlan{}, err
 	}
 
@@ -215,7 +217,7 @@ func (app *App) buildOpenClawProfileConfigEditPlan(rawProfileName string, reques
 		return openClawProfileConfigEditPlan{}, fmt.Errorf("%w: 配置已被其他操作修改，请先刷新", errOpenClawProfileConfigConflict)
 	}
 
-	configPath, root, err := app.loadOpenClawProfileConfigRoot(profileName, "active profile 配置预览")
+	configPath, root, err := app.loadOpenClawProfileConfigRoot(profileName, openClawProfileConfigEditContextLabel(appliesNow))
 	if err != nil {
 		return openClawProfileConfigEditPlan{}, err
 	}
@@ -274,16 +276,14 @@ func (app *App) buildOpenClawProfileConfigEditPlan(rawProfileName string, reques
 	}
 	previewText := string(previewBytes)
 	nextHash := strings.TrimSpace(derefString(hashText(&previewText)))
-	message := "没有配置变更。"
-	if len(changes) > 0 {
-		message = fmt.Sprintf("将更新 %d 项配置。", len(changes))
-	}
+	message := openClawProfileConfigPlanMessage(profileName, appliesNow, len(changes))
 
 	return openClawProfileConfigEditPlan{
 		ProfileName:   profileName,
 		ConfigPath:    configPath,
 		BaseHash:      baseHash,
 		NextHash:      nextHash,
+		AppliesNow:    appliesNow,
 		Changed:       len(changes) > 0,
 		Message:       message,
 		Changes:       changes,
@@ -292,18 +292,15 @@ func (app *App) buildOpenClawProfileConfigEditPlan(rawProfileName string, reques
 	}, nil
 }
 
-func (app *App) ensureActiveProfileConfigEditable(profileName string) error {
+func (app *App) openClawProfileConfigAppliesNow(profileName string) (bool, error) {
 	state, err := app.loadNormalizedManagerState()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if state.ActiveProfileName == nil {
-		return errors.New("当前没有激活中的 profile，不能应用安全编辑")
+		return false, nil
 	}
-	if *state.ActiveProfileName != profileName {
-		return errors.New("当前只允许编辑激活中的 profile")
-	}
-	return nil
+	return *state.ActiveProfileName == profileName, nil
 }
 
 func (app *App) loadOpenClawProfileConfigRoot(profileName, context string) (string, map[string]any, error) {
@@ -359,6 +356,33 @@ func normalizeOpenClawProfileConfigPatch(patch OpenClawProfileConfigPatch) (Open
 		patch.AuthMode = ptr(value)
 	}
 	return patch, hasPatch, nil
+}
+
+func openClawProfileConfigEditContextLabel(appliesNow bool) string {
+	if appliesNow {
+		return "active profile 配置预览"
+	}
+	return "inactive profile 配置预览"
+}
+
+func openClawProfileConfigPlanMessage(profileName string, appliesNow bool, changeCount int) string {
+	if changeCount == 0 {
+		if appliesNow {
+			return "没有配置变更。"
+		}
+		return fmt.Sprintf("没有配置变更；%s 的账号文件保持不变。", profileName)
+	}
+	if appliesNow {
+		return fmt.Sprintf("将更新 %d 项配置，并立即校验当前账号。", changeCount)
+	}
+	return fmt.Sprintf("将更新 %d 项配置；只写入 %s 的账号文件，切换到这个账号后生效。", changeCount, profileName)
+}
+
+func openClawProfileConfigApplyMessage(profileName string, appliesNow bool) string {
+	if appliesNow {
+		return "配置已应用，并完成当前账号校验。"
+	}
+	return fmt.Sprintf("配置已写入 %s；切换到这个账号后会按新配置运行。", profileName)
 }
 
 func ensureOpenClawPrimaryAuthProfile(root map[string]any) map[string]any {

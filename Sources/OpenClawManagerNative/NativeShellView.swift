@@ -433,10 +433,7 @@ private func profileFactItems(_ profile: ManagedProfileSnapshot) -> [(String, St
         ("模型来源", providerLabel(profile.primaryProviderId)),
         ("主模型", present(profile.primaryModelId)),
         ("已配置来源", profile.configuredProviderIds.isEmpty ? "未提供" : profile.configuredProviderIds.joined(separator: " · ")),
-        ("登录方式", loginKindLabel(profile.loginKind)),
-        ("剩余时效", formatDuration(ms: profile.tokenExpiresInMs)),
-        ("账号 ID", shortAccountId(profile.accountId)),
-        ("状态目录", profile.stateDir)
+        ("登录方式", loginKindLabel(profile.loginKind))
     ]
 
     if let companion = companionRuntimeLabel(profile.companionRuntimeKind) {
@@ -446,6 +443,14 @@ private func profileFactItems(_ profile: ManagedProfileSnapshot) -> [(String, St
     if profile.supportsQuota {
         items.insert(("账号类型", present(profile.quota.plan)), at: 3)
     }
+
+    if profile.tokenExpiresInMs != nil || profile.tokenExpiresAt != nil {
+        items.append(("认证剩余", formatDuration(ms: profile.tokenExpiresInMs)))
+        items.append(("认证到期", formatDate(profile.tokenExpiresAt)))
+    }
+
+    items.append(("账号 ID", shortAccountId(profile.accountId)))
+    items.append(("状态目录", profile.stateDir))
 
     if profile.codexAccountId != nil || profile.hasCodexAuth {
         items.append(("Codex 账号", shortAccountId(profile.codexAccountId)))
@@ -2150,6 +2155,13 @@ private struct ProfilesSection: View {
                         }
 
                         TwoColumnFacts(items: [("状态说明", spotlight.statusReason)] + profileFactItems(spotlight))
+                        if spotlight.tokenExpiresInMs != nil || spotlight.tokenExpiresAt != nil {
+                            CalloutBlock(
+                                label: "认证说明",
+                                value: "这里只显示当前登录令牌",
+                                detail: "不是账号套餐时效；真正可用额度看上面的 5 小时剩余和本周剩余。"
+                            )
+                        }
 
                         AdaptiveLine(spacing: 10) {
                                 if spotlight.supportsLogin, let loginLabel = loginActionLabel(spotlight.loginKind) {
@@ -2210,146 +2222,149 @@ private struct ProfilesSection: View {
                                 ("认证文件状态", summary.authStoreValid ? "可读" : summary.authStoreDetail)
                             ])
 
-                            if spotlight.isActive {
-                                if summary.configValid, document.configHash != nil {
-                                    VStack(alignment: .leading, spacing: 14) {
-                                        HStack(alignment: .firstTextBaseline, spacing: 10) {
-                                            Text("安全编辑")
-                                                .font(.headline)
-                                            if configDraftChanged {
-                                                TonePill(text: "有未保存变更", tint: NativePalette.amber.opacity(0.18), foreground: NativePalette.amber)
-                                            }
+                            if summary.configValid, document.configHash != nil {
+                                VStack(alignment: .leading, spacing: 14) {
+                                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                        Text("受控编辑")
+                                            .font(.headline)
+                                        if configDraftChanged {
+                                            TonePill(text: "有未保存变更", tint: NativePalette.amber.opacity(0.18), foreground: NativePalette.amber)
                                         }
-
-                                        Text("只开放主模型、主 Provider、认证模式这三项。先预览，再应用；应用后会立刻校验，不通过就回滚。")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-
-                                        AdaptiveLine(spacing: 12) {
-                                            VStack(alignment: .leading, spacing: 8) {
-                                                Text("主 Provider")
-                                                    .font(.caption.weight(.semibold))
-                                                    .foregroundStyle(.secondary)
-                                                TextField("例如 openai-codex", text: $profileConfigProviderId)
-                                                    .textFieldStyle(.roundedBorder)
-                                            }
-                                            VStack(alignment: .leading, spacing: 8) {
-                                                Text("主模型")
-                                                    .font(.caption.weight(.semibold))
-                                                    .foregroundStyle(.secondary)
-                                                TextField("例如 openai-codex/gpt-5", text: $profileConfigModelId)
-                                                    .textFieldStyle(.roundedBorder)
-                                            }
-                                        }
-
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            Text("认证模式")
-                                                .font(.caption.weight(.semibold))
-                                                .foregroundStyle(.secondary)
-                                            TextField("例如 chatgpt-oauth / api-key / configured", text: $profileConfigAuthMode)
-                                                .textFieldStyle(.roundedBorder)
-                                        }
-
-                                        Text("如果你改了 Provider，主模型前缀也要一起对应；否则预览会直接拦下。")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-
-                                        AdaptiveLine(spacing: 10) {
-                                            ActionButton("预览变更", systemImage: "eye", busy: store.isBusy("profile-config:preview:\(spotlight.name)")) {
-                                                guard let configHash = document.configHash else { return }
-                                                store.previewProfileConfig(
-                                                    profileName: spotlight.name,
-                                                    request: OpenClawProfileConfigEditRequest(
-                                                        baseHash: configHash,
-                                                        patch: OpenClawProfileConfigPatch(
-                                                            primaryProviderId: trimmedDraftProviderId,
-                                                            primaryModelId: trimmedDraftModelId,
-                                                            authMode: trimmedDraftAuthMode
-                                                        )
-                                                    )
-                                                )
-                                            }
-                                            .disabled(!configDraftReady)
-
-                                            ActionButton("应用配置", systemImage: "checkmark.circle", busy: store.isBusy("profile-config:apply:\(spotlight.name)")) {
-                                                guard let configHash = document.configHash else { return }
-                                                store.applyProfileConfig(
-                                                    profileName: spotlight.name,
-                                                    request: OpenClawProfileConfigEditRequest(
-                                                        baseHash: configHash,
-                                                        patch: OpenClawProfileConfigPatch(
-                                                            primaryProviderId: trimmedDraftProviderId,
-                                                            primaryModelId: trimmedDraftModelId,
-                                                            authMode: trimmedDraftAuthMode
-                                                        )
-                                                    )
-                                                )
-                                            }
-                                            .disabled(preview == nil || preview?.changed != true)
-
-                                            Button("还原草稿") {
-                                                profileConfigProviderId = currentProviderId
-                                                profileConfigModelId = currentModelId
-                                                profileConfigAuthMode = currentAuthMode
-                                                store.clearProfileConfigPreview()
-                                            }
-                                            .buttonStyle(NativeSecondaryButtonStyle())
-                                            .disabled(!configDraftChanged)
-                                        }
-
-                                        if let preview {
-                                            CalloutBlock(
-                                                label: "变更预览",
-                                                value: preview.changed ? "准备应用 \(preview.changes.count) 项变更" : "没有变化",
-                                                detail: preview.message
-                                            )
-
-                                            if !preview.changes.isEmpty {
-                                                ForEach(preview.changes) { change in
-                                                    VStack(alignment: .leading, spacing: 6) {
-                                                        Text(change.label)
-                                                            .font(.caption.weight(.semibold))
-                                                            .foregroundStyle(.secondary)
-                                                        Text("\(change.before) -> \(change.after)")
-                                                            .font(.callout)
-                                                            .foregroundStyle(NativePalette.ink)
-                                                            .fixedSize(horizontal: false, vertical: true)
-                                                    }
-                                                    .padding(12)
-                                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                                    .background(
-                                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                                            .fill(NativePalette.surfaceAlt)
-                                                    )
-                                                }
-                                            }
-
-                                            Button {
-                                                withAnimation(.easeOut(duration: 0.2)) {
-                                                    showPreviewProfileConfig.toggle()
-                                                }
-                                            } label: {
-                                                Label(showPreviewProfileConfig ? "收起预览配置" : "展开预览配置", systemImage: showPreviewProfileConfig ? "chevron.up" : "chevron.down")
-                                            }
-                                            .buttonStyle(NativeSecondaryButtonStyle())
-
-                                            if showPreviewProfileConfig {
-                                                ConfigCodeBlock(title: "预览 openclaw.json", text: preview.previewConfig)
-                                            }
+                                        if !spotlight.isActive {
+                                            TonePill(text: "未激活，切换后生效", tint: NativePalette.accent.opacity(0.18), foreground: NativePalette.accent)
                                         }
                                     }
-                                } else {
-                                    CalloutBlock(
-                                        label: "安全编辑",
-                                        value: "当前不能直接编辑",
-                                        detail: "先把 openclaw.json 修到可解析，再用这里的预览和应用。"
-                                    )
+
+                                    Text(profileConfigEditorIntro(profileName: spotlight.name, appliesNow: spotlight.isActive))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    if !spotlight.isActive {
+                                        CalloutBlock(
+                                            label: "写入范围",
+                                            value: "只改 \(spotlight.name) 的账号文件",
+                                            detail: "不会立刻切换账号；下次切到这个账号时，才会按这里的配置运行。"
+                                        )
+                                    }
+
+                                    AdaptiveLine(spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("主 Provider")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                            TextField("例如 openai-codex", text: $profileConfigProviderId)
+                                                .textFieldStyle(.roundedBorder)
+                                        }
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            Text("主模型")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                            TextField("例如 openai-codex/gpt-5", text: $profileConfigModelId)
+                                                .textFieldStyle(.roundedBorder)
+                                        }
+                                    }
+
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("认证模式")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                        TextField("例如 chatgpt-oauth / api-key / configured", text: $profileConfigAuthMode)
+                                            .textFieldStyle(.roundedBorder)
+                                    }
+
+                                    Text("如果你改了 Provider，主模型前缀也要一起对应；否则预览会直接拦下。")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    AdaptiveLine(spacing: 10) {
+                                        ActionButton(profileConfigPreviewButtonTitle(appliesNow: spotlight.isActive), systemImage: "eye", busy: store.isBusy("profile-config:preview:\(spotlight.name)")) {
+                                            guard let configHash = document.configHash else { return }
+                                            store.previewProfileConfig(
+                                                profileName: spotlight.name,
+                                                request: OpenClawProfileConfigEditRequest(
+                                                    baseHash: configHash,
+                                                    patch: OpenClawProfileConfigPatch(
+                                                        primaryProviderId: trimmedDraftProviderId,
+                                                        primaryModelId: trimmedDraftModelId,
+                                                        authMode: trimmedDraftAuthMode
+                                                    )
+                                                )
+                                            )
+                                        }
+                                        .disabled(!configDraftReady)
+
+                                        ActionButton(profileConfigApplyButtonTitle(appliesNow: spotlight.isActive), systemImage: "checkmark.circle", busy: store.isBusy("profile-config:apply:\(spotlight.name)")) {
+                                            guard let configHash = document.configHash else { return }
+                                            store.applyProfileConfig(
+                                                profileName: spotlight.name,
+                                                request: OpenClawProfileConfigEditRequest(
+                                                    baseHash: configHash,
+                                                    patch: OpenClawProfileConfigPatch(
+                                                        primaryProviderId: trimmedDraftProviderId,
+                                                        primaryModelId: trimmedDraftModelId,
+                                                        authMode: trimmedDraftAuthMode
+                                                    )
+                                                )
+                                            )
+                                        }
+                                        .disabled(preview == nil || preview?.changed != true)
+
+                                        Button("还原草稿") {
+                                            profileConfigProviderId = currentProviderId
+                                            profileConfigModelId = currentModelId
+                                            profileConfigAuthMode = currentAuthMode
+                                            store.clearProfileConfigPreview()
+                                        }
+                                        .buttonStyle(NativeSecondaryButtonStyle())
+                                        .disabled(!configDraftChanged)
+                                    }
+
+                                    if let preview {
+                                        CalloutBlock(
+                                            label: "变更预览",
+                                            value: profileConfigPreviewSummary(changed: preview.changed, changeCount: preview.changes.count, appliesNow: spotlight.isActive),
+                                            detail: preview.message
+                                        )
+
+                                        if !preview.changes.isEmpty {
+                                            ForEach(preview.changes) { change in
+                                                VStack(alignment: .leading, spacing: 6) {
+                                                    Text(change.label)
+                                                        .font(.caption.weight(.semibold))
+                                                        .foregroundStyle(.secondary)
+                                                    Text("\(change.before) -> \(change.after)")
+                                                        .font(.callout)
+                                                        .foregroundStyle(NativePalette.ink)
+                                                        .fixedSize(horizontal: false, vertical: true)
+                                                }
+                                                .padding(12)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                                        .fill(NativePalette.surfaceAlt)
+                                                )
+                                            }
+                                        }
+
+                                        Button {
+                                            withAnimation(.easeOut(duration: 0.2)) {
+                                                showPreviewProfileConfig.toggle()
+                                            }
+                                        } label: {
+                                            Label(showPreviewProfileConfig ? "收起预览配置" : "展开预览配置", systemImage: showPreviewProfileConfig ? "chevron.up" : "chevron.down")
+                                        }
+                                        .buttonStyle(NativeSecondaryButtonStyle())
+
+                                        if showPreviewProfileConfig {
+                                            ConfigCodeBlock(title: "预览 openclaw.json", text: preview.previewConfig)
+                                        }
+                                    }
                                 }
                             } else {
                                 CalloutBlock(
-                                    label: "安全编辑",
-                                    value: "仅当前激活账号可编辑",
-                                    detail: "先切到这个账号，再预览和应用配置。"
+                                    label: "受控编辑",
+                                    value: "当前不能直接编辑",
+                                    detail: "先把这个账号的 openclaw.json 修到可解析，再用这里预览和写入。"
                                 )
                             }
 
@@ -2659,6 +2674,29 @@ private func resolvedProfileAuthMode(_ summary: OpenClawProfileConfigSummary) ->
         return "chatgpt-oauth"
     }
     return "configured"
+}
+
+private func profileConfigEditorIntro(profileName: String, appliesNow: Bool) -> String {
+    if appliesNow {
+        return "只开放主模型、主 Provider、认证模式这三项。先预览，再应用；应用后会立刻校验，不通过就回滚。"
+    }
+    return "只开放主模型、主 Provider、认证模式这三项。这里先改 \(profileName) 的账号文件；通过预览后写入，等你切到这个账号时再生效。"
+}
+
+private func profileConfigPreviewButtonTitle(appliesNow: Bool) -> String {
+    appliesNow ? "预览变更" : "预览写入"
+}
+
+private func profileConfigApplyButtonTitle(appliesNow: Bool) -> String {
+    appliesNow ? "应用配置" : "写入账号"
+}
+
+private func profileConfigPreviewSummary(changed: Bool, changeCount: Int, appliesNow: Bool) -> String {
+    guard changed else { return "没有变化" }
+    if appliesNow {
+        return "准备应用 \(changeCount) 项变更"
+    }
+    return "准备写入 \(changeCount) 项变更"
 }
 
 private func boolLabel(_ value: Bool?) -> String {

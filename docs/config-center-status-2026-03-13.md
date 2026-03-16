@@ -2,7 +2,7 @@
 
 ## 当前执行切片
 
-- 范围：M1 只读配置中心 + M2 技能市场 MVP + skills 启停 / `extraDirs` / watcher / install 管理 + active profile 安全编辑
+- 范围：M1 只读配置中心 + M2 技能市场 MVP + skills 启停 / `extraDirs` / watcher / install 管理 + profile 受控编辑（active / inactive 第一批）
 - 目标：
   - 先落 `skills` 只读管理面与配置中心骨架
   - 再补精选市场、托管安装、托管卸载
@@ -11,6 +11,7 @@
   - 补齐设置页里目录监听与防抖时间的保存闭环
   - 补齐设置页里安装工具偏好的保存闭环
   - 补齐 active profile 的 preview / apply 安全编辑闭环
+  - 补齐 inactive profile 同白名单字段的 preview / apply / rollback 闭环
 - 原则：
   - 功能测试必须覆盖
   - App 性能测试必须记录
@@ -49,13 +50,16 @@
 - `M2-021` daemon：`POST /api/openclaw/profiles/{profileName}/config/preview|apply`：已完成
 - `M2-022` Swift：Profiles 配置卡接入 active profile 安全编辑：已完成
 - `M2-023` 测试：preview/apply、冲突控制与回滚 smoke：已完成
+- `M3-001` daemon：inactive profile 受控编辑沿用同一 `preview|apply` 路由，改为文件级 patch + validate + rollback：已完成
+- `M3-002` Swift：Profiles 配置卡开放 inactive profile 受控编辑，并明确“切换后生效”文案：已完成
+- `M3-003` 测试：inactive profile preview/apply + 备份覆盖：已完成
 
 ## 测试门禁
 
 - Go 构建：已通过
 - Swift 构建：已通过
 - 自动化测试：已通过（`go test ./cmd/openclaw-manager-daemon ./cmd/openclaw-watchdog`、`swift test`）
-- 本地功能验证：M1 / M2 已通过（安装版 `3311` 已验证 `market / inventory / config / profile validate`；临时 daemon 已验证 `enable / disable`、`extraDirs add/remove`、`watch/watchDebounceMs`、`install.preferBrew/install.nodeManager`、`profile config preview/apply` 都会真实改写 `openclaw.json`）
+- 本地功能验证：M1 / M2 / M3 第一批已通过（自动化已覆盖 inactive profile `preview/apply`、备份与回滚；`bash ./scripts/build-app.sh` 已通过，最新 app 已写入 `.build/app` 与 `release/`）
 - App 性能验证：已通过轻量验证（安装版 skills API 响应约 `0.75-5.96ms`）
 
 ## 性能门禁
@@ -71,7 +75,7 @@
 - `openclaw --profile <name> config validate` 可直接覆盖 profile 级显式校验，不需要自己猜 state dir 环境变量
 - `skills` 配置需要从 `openclaw.json` 读取，并对 `apiKey` / `env` 做摘要化展示
 - `skills.allowBundled` 在当前 OpenClaw 实现中是 allowlist 数组，不是布尔值
-- active profile 安全编辑当前只开放白名单字段，并用 `baseHash + validate + rollback` 保守落地
+- profile 受控编辑当前只开放白名单字段，并用 `baseHash + validate + rollback` 保守落地；active 立即生效并校验，inactive 先写账号文件、切换后生效
 - 技能市场采用三层结构：
   - awesome repo 作为精选目录层
   - ClawHub 作为详情与下载层

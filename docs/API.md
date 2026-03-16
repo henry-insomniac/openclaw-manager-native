@@ -40,6 +40,14 @@ http://127.0.0.1:3311
 - 账号池/切换面板
 - 菜单栏状态
 
+返回字段重点：
+
+- `profiles[].tokenExpiresAt` / `profiles[].tokenExpiresInMs`
+  - 表示 OAuth 访问令牌的到期时间和本地倒计时
+  - 不是账号订阅时效，也不是 5h / week 配额窗口
+- `profiles[].quota.fiveHour` / `profiles[].quota.week`
+  - 表示远端 usage 窗口、剩余额度百分比和重置时间
+
 ### `GET /api/openclaw/system`
 
 作用：
@@ -134,12 +142,12 @@ http://127.0.0.1:3311
 
 作用：
 
-- 对当前激活中的 profile 生成一份安全编辑预览
+- 对指定 profile 生成一份受控编辑预览
 - 只允许白名单字段 patch，不开放通用 JSON 任意写
 
 主要用于：
 
-- Profiles 页 active profile 的“安全编辑”预览按钮
+- Profiles 页的“受控编辑”预览按钮
 - 在应用前先看字段级差异和完整 `openclaw.json` 预览
 
 请求体：
@@ -152,11 +160,11 @@ http://127.0.0.1:3311
 
 说明：
 
-- 当前只允许编辑激活中的 profile
 - 当前白名单仅覆盖 `primaryProviderId`、`primaryModelId`、`authMode`
 - `primaryModelId` 必须是 `provider/model` 形式
 - `primaryProviderId` 必须与 `primaryModelId` 的 provider 前缀一致
 - `baseHash` 不匹配时返回 `409`，避免把旧草稿覆盖到新配置
+- 如果目标 profile 当前未激活，预览仍然可用，但只会改这个账号自己的 `openclaw.json`，切换到该账号后才生效
 
 返回字段重点：
 
@@ -172,12 +180,12 @@ http://127.0.0.1:3311
 
 作用：
 
-- 把 active profile 的安全编辑预览真正写回 `openclaw.json`
+- 把受控编辑预览真正写回目标 profile 的 `openclaw.json`
 - 写回后立即执行一次 profile config validate
 
 主要用于：
 
-- Profiles 页 active profile 的“应用配置”动作
+- Profiles 页的“应用配置 / 写入账号”动作
 
 请求体：
 
@@ -185,10 +193,10 @@ http://127.0.0.1:3311
 
 说明：
 
-- 当前只允许编辑激活中的 profile
 - 写回前会先备份原始 `openclaw.json`
 - 应用后会立即执行 `openclaw --profile <name> config validate`
 - 如果写回后的校验失败，会自动回滚原始文件
+- 如果目标 profile 当前未激活，写回只影响该账号自己的配置文件，不会立刻切换 active profile
 
 返回字段重点：
 

@@ -45,6 +45,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     private var currentSkillsMarketSort: SkillsMarketSort = .downloads
     private var lastMenuBarError: String?
     private var isRestarting = false
+    private var shouldHideWindowAfterExitingFullScreen = false
 
     private func requireMainThread() {
         precondition(Thread.isMainThread, "AppKit operation must run on the main thread")
@@ -98,8 +99,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
     @MainActor
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender.styleMask.contains(.fullScreen) {
+            shouldHideWindowAfterExitingFullScreen = true
+            appendLifecycleLog("window close requested while full screen; exit full screen before hiding")
+            sender.toggleFullScreen(nil)
+            return false
+        }
+
+        appendLifecycleLog("window close requested; hide main window")
         sender.orderOut(nil)
         return false
+    }
+
+    @MainActor
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard shouldHideWindowAfterExitingFullScreen,
+              let exitingWindow = notification.object as? NSWindow else {
+            return
+        }
+
+        shouldHideWindowAfterExitingFullScreen = false
+        appendLifecycleLog("hide main window after exiting full screen")
+        exitingWindow.orderOut(nil)
     }
 
     private func configureStoreActions() {
@@ -2203,6 +2224,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
     @MainActor
     private func presentMainWindow() {
         requireMainThread()
+        shouldHideWindowAfterExitingFullScreen = false
         ensureWindow()
         guard let window else { return }
         window.makeKeyAndOrderFront(nil)
