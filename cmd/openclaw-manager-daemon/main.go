@@ -52,6 +52,7 @@ const (
 	machineSummaryCacheTTL      = 3 * time.Second
 	skillsSummaryCacheTTL       = 20 * time.Second
 	oauthTimeout                = 10 * time.Minute
+	runtimeIssueWindow          = 10 * time.Minute
 	legacyDefaultPollIntervalMs = 60_000
 	minProbeIntervalMs          = 30_000
 	maxProbeIntervalMs          = 60 * 60_000
@@ -165,6 +166,21 @@ type cachedOpenClawSkillsSummary struct {
 	FetchedAt time.Time
 }
 
+type runtimeFailureSignal struct {
+	Kind       string
+	Message    string
+	OccurredAt time.Time
+}
+
+type runtimeCooldownEntry struct {
+	Kind        string `json:"kind,omitempty"`
+	ProfileName string `json:"profileName,omitempty"`
+	AccountID   string `json:"accountId,omitempty"`
+	Message     string `json:"message,omitempty"`
+	OccurredAt  string `json:"occurredAt,omitempty"`
+	ExpiresAt   string `json:"expiresAt,omitempty"`
+}
+
 type machineNetworkCounters struct {
 	Interface   string
 	Received    uint64
@@ -208,16 +224,17 @@ type AutomationRuntimeState struct {
 }
 
 type RuntimeTelemetryState struct {
-	TotalActivations            *int    `json:"totalActivations,omitempty"`
-	ManualActivations           *int    `json:"manualActivations,omitempty"`
-	AutoActivations             *int    `json:"autoActivations,omitempty"`
-	RecommendedActivations      *int    `json:"recommendedActivations,omitempty"`
-	LastActivationAt            *string `json:"lastActivationAt,omitempty"`
-	LastActivationDurationMs    *int    `json:"lastActivationDurationMs,omitempty"`
-	AverageActivationDurationMs *int    `json:"averageActivationDurationMs,omitempty"`
-	LastActivationTrigger       *string `json:"lastActivationTrigger,omitempty"`
-	LastActivationReason        *string `json:"lastActivationReason,omitempty"`
-	LastSyncedAt                *string `json:"lastSyncedAt,omitempty"`
+	TotalActivations            *int                   `json:"totalActivations,omitempty"`
+	ManualActivations           *int                   `json:"manualActivations,omitempty"`
+	AutoActivations             *int                   `json:"autoActivations,omitempty"`
+	RecommendedActivations      *int                   `json:"recommendedActivations,omitempty"`
+	LastActivationAt            *string                `json:"lastActivationAt,omitempty"`
+	LastActivationDurationMs    *int                   `json:"lastActivationDurationMs,omitempty"`
+	AverageActivationDurationMs *int                   `json:"averageActivationDurationMs,omitempty"`
+	LastActivationTrigger       *string                `json:"lastActivationTrigger,omitempty"`
+	LastActivationReason        *string                `json:"lastActivationReason,omitempty"`
+	LastSyncedAt                *string                `json:"lastSyncedAt,omitempty"`
+	RuntimeCooldowns            []runtimeCooldownEntry `json:"runtimeCooldowns,omitempty"`
 }
 
 type ManagerSettings struct {
@@ -344,23 +361,33 @@ type RuntimeDaemon struct {
 	LoopRunning         bool    `json:"loopRunning"`
 }
 
+type RuntimeAuthSelection struct {
+	ProviderID         *string `json:"providerId,omitempty"`
+	ProfileID          *string `json:"profileId,omitempty"`
+	ManagedProfileName *string `json:"managedProfileName,omitempty"`
+	AccountEmail       *string `json:"accountEmail,omitempty"`
+	AccountID          *string `json:"accountId,omitempty"`
+	LastUsedAt         *string `json:"lastUsedAt,omitempty"`
+}
+
 type RuntimeSwitching struct {
-	ActiveProfileName           *string `json:"activeProfileName,omitempty"`
-	RecommendedProfileName      *string `json:"recommendedProfileName,omitempty"`
-	TotalProfiles               int     `json:"totalProfiles"`
-	HealthyProfiles             int     `json:"healthyProfiles"`
-	DrainingProfiles            int     `json:"drainingProfiles"`
-	RiskyProfiles               int     `json:"riskyProfiles"`
-	TotalActivations            int     `json:"totalActivations"`
-	ManualActivations           int     `json:"manualActivations"`
-	AutoActivations             int     `json:"autoActivations"`
-	RecommendedActivations      int     `json:"recommendedActivations"`
-	LastActivationAt            *string `json:"lastActivationAt,omitempty"`
-	LastActivationDurationMs    *int    `json:"lastActivationDurationMs,omitempty"`
-	AverageActivationDurationMs *int    `json:"averageActivationDurationMs,omitempty"`
-	LastActivationTrigger       *string `json:"lastActivationTrigger,omitempty"`
-	LastActivationReason        *string `json:"lastActivationReason,omitempty"`
-	LastSyncedAt                *string `json:"lastSyncedAt,omitempty"`
+	ActiveProfileName           *string               `json:"activeProfileName,omitempty"`
+	RecommendedProfileName      *string               `json:"recommendedProfileName,omitempty"`
+	CurrentAuthSelection        *RuntimeAuthSelection `json:"currentAuthSelection,omitempty"`
+	TotalProfiles               int                   `json:"totalProfiles"`
+	HealthyProfiles             int                   `json:"healthyProfiles"`
+	DrainingProfiles            int                   `json:"drainingProfiles"`
+	RiskyProfiles               int                   `json:"riskyProfiles"`
+	TotalActivations            int                   `json:"totalActivations"`
+	ManualActivations           int                   `json:"manualActivations"`
+	AutoActivations             int                   `json:"autoActivations"`
+	RecommendedActivations      int                   `json:"recommendedActivations"`
+	LastActivationAt            *string               `json:"lastActivationAt,omitempty"`
+	LastActivationDurationMs    *int                  `json:"lastActivationDurationMs,omitempty"`
+	AverageActivationDurationMs *int                  `json:"averageActivationDurationMs,omitempty"`
+	LastActivationTrigger       *string               `json:"lastActivationTrigger,omitempty"`
+	LastActivationReason        *string               `json:"lastActivationReason,omitempty"`
+	LastSyncedAt                *string               `json:"lastSyncedAt,omitempty"`
 }
 
 type RuntimeCompatibility struct {
@@ -1285,6 +1312,18 @@ func (app *App) runAutomationTickUnlocked(trigger string) (AutomationTickResult,
 		_ = app.saveManagerState(state)
 		return AutomationTickResult{}, err
 	}
+	if app.persistRecentRuntimeCooldown(&state, summary) {
+		if err := app.saveManagerState(state); err != nil {
+			return AutomationTickResult{}, err
+		}
+		summary, err = app.getManagerSummaryFromState(state)
+		if err != nil {
+			message := err.Error()
+			state.Automation.LastTickError = &message
+			_ = app.saveManagerState(state)
+			return AutomationTickResult{}, err
+		}
+	}
 
 	decision := shouldAutoSwitch(summary)
 	if !decision.ShouldSwitch || decision.TargetProfileName == nil {
@@ -1753,7 +1792,45 @@ func mergeRuntimeTelemetry(defaults RuntimeTelemetryState, current RuntimeTeleme
 	}
 	out.LastActivationReason = current.LastActivationReason
 	out.LastSyncedAt = current.LastSyncedAt
+	out.RuntimeCooldowns = normalizeRuntimeCooldowns(current.RuntimeCooldowns)
 	return out
+}
+
+func normalizeRuntimeCooldowns(entries []runtimeCooldownEntry) []runtimeCooldownEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	normalized := make([]runtimeCooldownEntry, 0, len(entries))
+	for _, entry := range entries {
+		entry.Kind = strings.TrimSpace(entry.Kind)
+		entry.ProfileName = strings.TrimSpace(entry.ProfileName)
+		entry.AccountID = strings.TrimSpace(entry.AccountID)
+		entry.Message = strings.TrimSpace(entry.Message)
+		entry.OccurredAt = strings.TrimSpace(entry.OccurredAt)
+		entry.ExpiresAt = strings.TrimSpace(entry.ExpiresAt)
+		if entry.Kind == "" {
+			continue
+		}
+		if entry.ProfileName == "" && entry.AccountID == "" {
+			continue
+		}
+		if entry.ExpiresAt == "" {
+			continue
+		}
+		expiresAt, ok := parseRFC3339Time(entry.ExpiresAt)
+		if !ok || !expiresAt.After(now) {
+			continue
+		}
+		normalized = append(normalized, entry)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		return normalized[i].ExpiresAt < normalized[j].ExpiresAt
+	})
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func valueOrDefaultStatuses(settings *PersistedManagerSettings) []string {
@@ -1945,6 +2022,8 @@ func (app *App) getManagerSummaryFromState(state NormalizedManagerState) (Manage
 		snapshots[result.index] = result.snapshot
 	}
 
+	snapshots = applyPersistedRuntimeCooldowns(state.Runtime.RuntimeCooldowns, snapshots)
+	snapshots = app.applyRecentRuntimeIssue(state, snapshots)
 	recommended := pickRecommendedProfile(snapshots)
 	for idx := range snapshots {
 		snapshots[idx].IsActive = state.ActiveProfileName != nil && snapshots[idx].Name == *state.ActiveProfileName
@@ -2036,6 +2115,7 @@ func (app *App) buildRuntimeOverview(generatedAt string, state NormalizedManager
 		Switching: RuntimeSwitching{
 			ActiveProfileName:           state.ActiveProfileName,
 			RecommendedProfileName:      recommended,
+			CurrentAuthSelection:        app.resolveCurrentRuntimeAuthSelection(profiles),
 			TotalProfiles:               len(profiles),
 			HealthyProfiles:             healthy,
 			DrainingProfiles:            draining,
@@ -2059,6 +2139,382 @@ func (app *App) buildRuntimeOverview(generatedAt string, state NormalizedManager
 			WrapperCommand:         automation.WrapperCommand,
 			CodexWrapperCommand:    automation.CodexWrapperCommand,
 		},
+	}
+}
+
+func (app *App) resolveCurrentRuntimeAuthSelection(profiles []ManagedProfileSnapshot) *RuntimeAuthSelection {
+	store, err := app.loadAuthStore(defaultProfileName)
+	if err != nil || len(store.LastGood) == 0 {
+		return nil
+	}
+
+	defaultConfigPath, err := app.resolveConfigPath(defaultProfileName)
+	if err != nil {
+		defaultConfigPath = ""
+	}
+	primaryProviderID := derefString(readOpenClawConfigSnapshot(defaultConfigPath).PrimaryProviderID)
+
+	providerIDs := make([]string, 0, len(store.LastGood))
+	for providerID, profileID := range store.LastGood {
+		if strings.TrimSpace(providerID) == "" || strings.TrimSpace(profileID) == "" {
+			continue
+		}
+		providerIDs = append(providerIDs, providerID)
+	}
+	sort.Strings(providerIDs)
+
+	var bestSelection *RuntimeAuthSelection
+	var bestLastUsed int64
+	bestHasLastUsed := false
+	bestPrimaryProvider := false
+	for _, providerID := range providerIDs {
+		profileID := strings.TrimSpace(store.LastGood[providerID])
+		if profileID == "" {
+			continue
+		}
+
+		selection := &RuntimeAuthSelection{
+			ProviderID: ptr(strings.TrimSpace(providerID)),
+			ProfileID:  ptr(profileID),
+		}
+		lastUsed := int64(0)
+		hasLastUsed := false
+		if stats := store.UsageStats[profileID]; stats != nil {
+			if value, ok := anyInt64(stats["lastUsed"]); ok && value > 0 {
+				lastUsed = value
+				hasLastUsed = true
+				selection.LastUsedAt = nullableTimeFromMillis(value)
+			}
+		}
+		credential := store.Profiles[profileID]
+		if accountID, accountEmail := runtimeAuthCredentialIdentity(credential); accountID != nil || accountEmail != nil {
+			selection.AccountID = accountID
+			selection.AccountEmail = accountEmail
+		}
+		if matched := resolveManagedProfileForRuntimeSelection(profileID, derefString(selection.AccountID), profiles); matched != nil {
+			selection.ManagedProfileName = ptr(matched.Name)
+			if selection.AccountID == nil {
+				selection.AccountID = matched.AccountID
+			}
+			if selection.AccountEmail == nil {
+				selection.AccountEmail = matched.AccountEmail
+			}
+		}
+
+		currentPrimaryProvider := normalizeProviderIDForCompare(providerID) == normalizeProviderIDForCompare(primaryProviderID)
+		if bestSelection == nil {
+			bestSelection = selection
+			bestLastUsed = lastUsed
+			bestHasLastUsed = hasLastUsed
+			bestPrimaryProvider = currentPrimaryProvider
+			continue
+		}
+		switch {
+		case hasLastUsed && !bestHasLastUsed:
+			bestSelection = selection
+			bestLastUsed = lastUsed
+			bestHasLastUsed = true
+			bestPrimaryProvider = currentPrimaryProvider
+		case hasLastUsed && bestHasLastUsed && lastUsed > bestLastUsed:
+			bestSelection = selection
+			bestLastUsed = lastUsed
+			bestPrimaryProvider = currentPrimaryProvider
+		case hasLastUsed == bestHasLastUsed && currentPrimaryProvider && !bestPrimaryProvider:
+			bestSelection = selection
+			bestLastUsed = lastUsed
+			bestHasLastUsed = hasLastUsed
+			bestPrimaryProvider = true
+		}
+	}
+	return bestSelection
+}
+
+func runtimeAuthCredentialIdentity(credential map[string]any) (*string, *string) {
+	if oauth := oauthCredentialFromMap(credential); oauth != nil {
+		accountID := nullableString(firstNonEmpty(oauth.AccountID, extractAccountID(oauth.Access)))
+		accountEmail := nullableString(firstNonEmpty(extractEmail(oauth.Access), anyString(credential["email"])))
+		return accountID, accountEmail
+	}
+	accountID := nullableString(anyString(credential["accountId"]))
+	accountEmail := nullableString(anyString(credential["email"]))
+	return accountID, accountEmail
+}
+
+func resolveManagedProfileForRuntimeSelection(profileID, accountID string, profiles []ManagedProfileSnapshot) *ManagedProfileSnapshot {
+	if suffix := runtimeProfileManagedSuffix(profileID); suffix != "" {
+		for idx := range profiles {
+			if profiles[idx].Name == suffix {
+				return &profiles[idx]
+			}
+		}
+	}
+	if strings.TrimSpace(accountID) != "" {
+		for idx := range profiles {
+			if derefString(profiles[idx].AccountID) == accountID && !profiles[idx].IsDefault {
+				return &profiles[idx]
+			}
+		}
+	}
+	return nil
+}
+
+func runtimeProfileManagedSuffix(profileID string) string {
+	providerID, suffix, ok := strings.Cut(strings.TrimSpace(profileID), ":")
+	if !ok || normalizeProviderIDForCompare(providerID) != "openai-codex" {
+		return ""
+	}
+	if suffix == "" || suffix == defaultProfileName {
+		return ""
+	}
+	return strings.TrimSpace(suffix)
+}
+
+func normalizeProviderIDForCompare(value string) string {
+	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func (app *App) applyRecentRuntimeIssue(state NormalizedManagerState, snapshots []ManagedProfileSnapshot) []ManagedProfileSnapshot {
+	if state.ActiveProfileName == nil || len(snapshots) == 0 {
+		return snapshots
+	}
+
+	issue := app.readRecentRuntimeFailureSignal(state.LastActivatedAt)
+	if issue == nil {
+		return snapshots
+	}
+
+	activeIndex := -1
+	for idx := range snapshots {
+		if snapshots[idx].Name == *state.ActiveProfileName {
+			activeIndex = idx
+			break
+		}
+	}
+	if activeIndex < 0 {
+		return snapshots
+	}
+
+	activeAccountID := strings.TrimSpace(derefString(snapshots[activeIndex].AccountID))
+	for idx := range snapshots {
+		sameActiveAccount := activeAccountID != "" && strings.TrimSpace(derefString(snapshots[idx].AccountID)) == activeAccountID
+		if snapshots[idx].Name != *state.ActiveProfileName && !sameActiveAccount {
+			continue
+		}
+		applyRuntimeIssueToSnapshot(&snapshots[idx], *issue)
+	}
+	return snapshots
+}
+
+func applyPersistedRuntimeCooldowns(entries []runtimeCooldownEntry, snapshots []ManagedProfileSnapshot) []ManagedProfileSnapshot {
+	if len(entries) == 0 || len(snapshots) == 0 {
+		return snapshots
+	}
+	for _, entry := range entries {
+		issue := runtimeFailureSignal{
+			Kind:    entry.Kind,
+			Message: entry.Message,
+		}
+		for idx := range snapshots {
+			if !runtimeCooldownMatchesSnapshot(entry, snapshots[idx]) {
+				continue
+			}
+			applyRuntimeIssueToSnapshot(&snapshots[idx], issue)
+		}
+	}
+	return snapshots
+}
+
+func runtimeCooldownMatchesSnapshot(entry runtimeCooldownEntry, snapshot ManagedProfileSnapshot) bool {
+	if entry.AccountID != "" {
+		return strings.TrimSpace(derefString(snapshot.AccountID)) == entry.AccountID
+	}
+	if entry.ProfileName != "" {
+		return snapshot.Name == entry.ProfileName
+	}
+	return false
+}
+
+func applyRuntimeIssueToSnapshot(snapshot *ManagedProfileSnapshot, issue runtimeFailureSignal) {
+	if snapshot == nil {
+		return
+	}
+	if message := strings.TrimSpace(issue.Message); message != "" {
+		snapshot.LastError = &message
+	}
+	if issue.Kind != "rate_limit" {
+		return
+	}
+	if snapshot.Status == "reauth_required" || snapshot.Status == "exhausted" {
+		return
+	}
+	snapshot.Status = "cooldown"
+	snapshot.StatusReason = "运行时命中 API 限流，暂时切换账号"
+}
+
+func (app *App) persistRecentRuntimeCooldown(state *NormalizedManagerState, summary ManagerSummary) bool {
+	if state == nil || summary.ActiveProfileName == nil {
+		return false
+	}
+	issue := app.readRecentRuntimeFailureSignal(state.LastActivatedAt)
+	if issue == nil || issue.Kind != "rate_limit" {
+		return false
+	}
+	var active *ManagedProfileSnapshot
+	for idx := range summary.Profiles {
+		if summary.Profiles[idx].Name == *summary.ActiveProfileName {
+			active = &summary.Profiles[idx]
+			break
+		}
+	}
+	if active == nil {
+		return false
+	}
+	entry := runtimeCooldownEntry{
+		Kind:        issue.Kind,
+		ProfileName: active.Name,
+		AccountID:   strings.TrimSpace(derefString(active.AccountID)),
+		Message:     strings.TrimSpace(issue.Message),
+		OccurredAt:  issue.OccurredAt.UTC().Format(time.RFC3339),
+		ExpiresAt:   issue.OccurredAt.Add(runtimeIssueWindow).UTC().Format(time.RFC3339),
+	}
+	nextCooldowns := upsertRuntimeCooldown(state.Runtime.RuntimeCooldowns, entry)
+	if sameRuntimeCooldowns(nextCooldowns, state.Runtime.RuntimeCooldowns) {
+		return false
+	}
+	state.Runtime.RuntimeCooldowns = nextCooldowns
+	return true
+}
+
+func upsertRuntimeCooldown(existing []runtimeCooldownEntry, entry runtimeCooldownEntry) []runtimeCooldownEntry {
+	entry.Kind = strings.TrimSpace(entry.Kind)
+	entry.ProfileName = strings.TrimSpace(entry.ProfileName)
+	entry.AccountID = strings.TrimSpace(entry.AccountID)
+	entry.Message = strings.TrimSpace(entry.Message)
+	entry.OccurredAt = strings.TrimSpace(entry.OccurredAt)
+	entry.ExpiresAt = strings.TrimSpace(entry.ExpiresAt)
+	if entry.Kind == "" || entry.ExpiresAt == "" || (entry.ProfileName == "" && entry.AccountID == "") {
+		return normalizeRuntimeCooldowns(existing)
+	}
+	updated := false
+	next := make([]runtimeCooldownEntry, 0, len(existing)+1)
+	for _, current := range normalizeRuntimeCooldowns(existing) {
+		sameScope := current.Kind == entry.Kind &&
+			current.ProfileName == entry.ProfileName &&
+			current.AccountID == entry.AccountID
+		if !sameScope {
+			next = append(next, current)
+			continue
+		}
+		if current.ExpiresAt >= entry.ExpiresAt {
+			next = append(next, current)
+		} else {
+			next = append(next, entry)
+		}
+		updated = true
+	}
+	if !updated {
+		next = append(next, entry)
+	}
+	return normalizeRuntimeCooldowns(next)
+}
+
+func sameRuntimeCooldowns(left []runtimeCooldownEntry, right []runtimeCooldownEntry) bool {
+	left = normalizeRuntimeCooldowns(left)
+	right = normalizeRuntimeCooldowns(right)
+	if len(left) != len(right) {
+		return false
+	}
+	for idx := range left {
+		if left[idx] != right[idx] {
+			return false
+		}
+	}
+	return true
+}
+
+func (app *App) readRecentRuntimeFailureSignal(lastActivatedAt *string) *runtimeFailureSignal {
+	logText, err := readTail(app.gatewayErrLogPath(), logTailBytes)
+	if err != nil {
+		return nil
+	}
+
+	cutoff := time.Now().Add(-runtimeIssueWindow)
+	if activatedAt, ok := parseRFC3339Time(derefString(lastActivatedAt)); ok && activatedAt.After(cutoff) {
+		cutoff = activatedAt
+	}
+
+	lines := strings.Split(logText, "\n")
+	var fallback *runtimeFailureSignal
+	for idx := len(lines) - 1; idx >= 0; idx-- {
+		line := strings.TrimSpace(lines[idx])
+		if line == "" || !strings.Contains(line, "[agent/embedded] embedded run agent end:") || !strings.Contains(line, "isError=true") {
+			continue
+		}
+		millis, ok := parseLogTimestamp(line)
+		if !ok {
+			continue
+		}
+		occurredAt := time.UnixMilli(millis).UTC()
+		if occurredAt.Before(cutoff) {
+			break
+		}
+
+		errorText, ok := extractRuntimeFailureMessage(line)
+		if !ok {
+			continue
+		}
+		kind := classifyRuntimeFailureMessage(errorText)
+		if kind == "" {
+			continue
+		}
+
+		signal := &runtimeFailureSignal{
+			Kind:       kind,
+			Message:    errorText,
+			OccurredAt: occurredAt,
+		}
+		if kind == "rate_limit" {
+			return signal
+		}
+		if fallback == nil {
+			fallback = signal
+		}
+	}
+	return fallback
+}
+
+func extractRuntimeFailureMessage(line string) (string, bool) {
+	index := strings.LastIndex(line, " error=")
+	if index < 0 {
+		return "", false
+	}
+	message := strings.TrimSpace(line[index+len(" error="):])
+	if message == "" {
+		return "", false
+	}
+	return message, true
+}
+
+func classifyRuntimeFailureMessage(message string) string {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if lower == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(lower, "api rate limit reached"),
+		strings.Contains(lower, "rate limit"),
+		strings.Contains(lower, "too many requests"),
+		strings.Contains(lower, "usage limit"),
+		strings.Contains(lower, "quota exceeded"),
+		strings.Contains(lower, "resource has been exhausted"):
+		return "rate_limit"
+	case strings.Contains(lower, "llm request timed out"),
+		strings.Contains(lower, "timed out"),
+		strings.Contains(lower, "timeout"),
+		strings.Contains(lower, "fetch failed"):
+		return "timeout"
+	default:
+		return ""
 	}
 }
 
@@ -3295,6 +3751,244 @@ func scoreProfile(profile ManagedProfileSnapshot) float64 {
 	}
 }
 
+type defaultCodexPoolProfile struct {
+	ManagedProfileName string
+	RuntimeProfileID   string
+	Credential         map[string]any
+	UsageStats         map[string]any
+	ConfigEntry        map[string]any
+}
+
+func defaultCodexPoolProfileID(profileName string) string {
+	return "openai-codex:" + strings.TrimSpace(profileName)
+}
+
+func cloneAnyMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	cloned := make(map[string]any, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func authProfileProviderID(value map[string]any) string {
+	if credential := oauthCredentialFromMap(value); credential != nil {
+		return strings.TrimSpace(credential.Provider)
+	}
+	return strings.TrimSpace(anyString(value["provider"]))
+}
+
+func authStoreProviderIDForProfile(store AuthStore, profileID string) string {
+	if profile := store.Profiles[profileID]; profile != nil {
+		if providerID := authProfileProviderID(profile); providerID != "" {
+			return providerID
+		}
+	}
+	providerID, _, _ := strings.Cut(strings.TrimSpace(profileID), ":")
+	return strings.TrimSpace(providerID)
+}
+
+func configAuthProfileProviderID(value any) string {
+	record, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(anyString(record["provider"]))
+}
+
+func (app *App) buildDefaultCodexAuthPool(activeProfileName string, targetStore AuthStore) (AuthStore, []defaultCodexPoolProfile, error) {
+	profileNames, err := app.discoverProfileNames(ptr(activeProfileName))
+	if err != nil {
+		return AuthStore{}, nil, err
+	}
+
+	nextStore := defaultAuthStore()
+	nextStore.Version = max(1, targetStore.Version)
+	for profileID, credential := range targetStore.Profiles {
+		if authStoreProviderIDForProfile(targetStore, profileID) == "openai-codex" {
+			continue
+		}
+		nextStore.Profiles[profileID] = cloneAnyMap(credential)
+	}
+	for profileID, stats := range targetStore.UsageStats {
+		if authStoreProviderIDForProfile(targetStore, profileID) == "openai-codex" {
+			continue
+		}
+		nextStore.UsageStats[profileID] = cloneAnyMap(stats)
+	}
+	for providerID, profileID := range targetStore.LastGood {
+		if strings.TrimSpace(providerID) == "openai-codex" {
+			continue
+		}
+		nextStore.LastGood[providerID] = profileID
+	}
+
+	pool := make([]defaultCodexPoolProfile, 0)
+	for _, profileName := range profileNames {
+		if profileName == defaultProfileName {
+			continue
+		}
+		sourceStore, err := app.loadAuthStore(profileName)
+		if err != nil {
+			return AuthStore{}, nil, err
+		}
+		nextStore.Version = max(nextStore.Version, sourceStore.Version)
+		if profileName == activeProfileName {
+			for profileID, credential := range sourceStore.Profiles {
+				if authStoreProviderIDForProfile(sourceStore, profileID) == "openai-codex" {
+					continue
+				}
+				nextStore.Profiles[profileID] = cloneAnyMap(credential)
+			}
+			for profileID, stats := range sourceStore.UsageStats {
+				if authStoreProviderIDForProfile(sourceStore, profileID) == "openai-codex" {
+					continue
+				}
+				nextStore.UsageStats[profileID] = cloneAnyMap(stats)
+			}
+			for providerID, profileID := range sourceStore.LastGood {
+				if strings.TrimSpace(providerID) == "openai-codex" {
+					continue
+				}
+				nextStore.LastGood[providerID] = profileID
+			}
+		}
+
+		profileID := pickCodexProfileID(sourceStore)
+		if profileID == nil {
+			continue
+		}
+		sourceCredential := oauthCredentialFromMap(sourceStore.Profiles[*profileID])
+		if sourceCredential == nil || sourceCredential.Provider != "openai-codex" || sourceCredential.Type != "oauth" {
+			continue
+		}
+
+		runtimeProfileID := defaultCodexPoolProfileID(profileName)
+		usageStats := cloneAnyMap(targetStore.UsageStats[runtimeProfileID])
+		if usageStats == nil {
+			usageStats = cloneAnyMap(sourceStore.UsageStats[*profileID])
+		}
+		configEntry := map[string]any{
+			"provider": "openai-codex",
+			"mode":     "oauth",
+		}
+		if email := strings.TrimSpace(extractEmail(sourceCredential.Access)); email != "" {
+			configEntry["email"] = email
+		}
+
+		pool = append(pool, defaultCodexPoolProfile{
+			ManagedProfileName: profileName,
+			RuntimeProfileID:   runtimeProfileID,
+			Credential:         cloneAnyMap(sourceStore.Profiles[*profileID]),
+			UsageStats:         usageStats,
+			ConfigEntry:        configEntry,
+		})
+	}
+
+	sort.Slice(pool, func(i, j int) bool {
+		leftActive := pool[i].ManagedProfileName == activeProfileName
+		rightActive := pool[j].ManagedProfileName == activeProfileName
+		if leftActive != rightActive {
+			return leftActive
+		}
+		return profileSortKey(pool[i].ManagedProfileName) < profileSortKey(pool[j].ManagedProfileName)
+	})
+
+	for _, entry := range pool {
+		nextStore.Profiles[entry.RuntimeProfileID] = cloneAnyMap(entry.Credential)
+		if entry.UsageStats != nil {
+			nextStore.UsageStats[entry.RuntimeProfileID] = cloneAnyMap(entry.UsageStats)
+		}
+	}
+	if len(pool) > 0 {
+		nextStore.LastGood["openai-codex"] = pool[0].RuntimeProfileID
+	}
+	return nextStore, pool, nil
+}
+
+func (app *App) syncDefaultCodexAuthConfig(pool []defaultCodexPoolProfile, preservedAuthRoot map[string]any) error {
+	defaultConfigPath, err := app.resolveConfigPath(defaultProfileName)
+	if err != nil {
+		return err
+	}
+	buffer, err := os.ReadFile(defaultConfigPath)
+	if err != nil {
+		return err
+	}
+	root, err := decodeJSONObjectOrEmpty(buffer)
+	if err != nil {
+		return err
+	}
+	authRoot, _ := root["auth"].(map[string]any)
+	if authRoot == nil {
+		authRoot = map[string]any{}
+	}
+	existingProfiles, _ := authRoot["profiles"].(map[string]any)
+	preservedProfiles, _ := preservedAuthRoot["profiles"].(map[string]any)
+	nextProfiles := map[string]any{}
+	for profileID, value := range preservedProfiles {
+		if configAuthProfileProviderID(value) == "openai-codex" {
+			continue
+		}
+		nextProfiles[profileID] = value
+	}
+	for profileID, value := range existingProfiles {
+		if configAuthProfileProviderID(value) == "openai-codex" {
+			continue
+		}
+		nextProfiles[profileID] = value
+	}
+	for _, entry := range pool {
+		nextProfiles[entry.RuntimeProfileID] = cloneAnyMap(entry.ConfigEntry)
+	}
+	authRoot["profiles"] = nextProfiles
+
+	existingOrder, _ := authRoot["order"].(map[string]any)
+	preservedOrder, _ := preservedAuthRoot["order"].(map[string]any)
+	nextOrder := map[string]any{}
+	for providerID, value := range preservedOrder {
+		if strings.TrimSpace(providerID) == "openai-codex" {
+			continue
+		}
+		nextOrder[providerID] = value
+	}
+	for providerID, value := range existingOrder {
+		if strings.TrimSpace(providerID) == "openai-codex" {
+			continue
+		}
+		nextOrder[providerID] = value
+	}
+	if len(pool) > 0 {
+		order := make([]string, 0, len(pool))
+		for _, entry := range pool {
+			order = append(order, entry.RuntimeProfileID)
+		}
+		nextOrder["openai-codex"] = order
+	}
+	if len(nextOrder) > 0 {
+		authRoot["order"] = nextOrder
+	} else {
+		delete(authRoot, "order")
+	}
+	root["auth"] = authRoot
+
+	nextBuffer, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	nextBuffer = append(nextBuffer, '\n')
+	if bytes.Equal(nextBuffer, buffer) {
+		return nil
+	}
+	if err := app.backupFile(defaultConfigPath, "default-openclaw-config"); err != nil {
+		return err
+	}
+	return os.WriteFile(defaultConfigPath, nextBuffer, 0o600)
+}
+
 func (app *App) syncProfileToDefault(profileName string) error {
 	if profileName == defaultProfileName {
 		return nil
@@ -3312,8 +4006,10 @@ func (app *App) syncProfileToDefault(profileName string) error {
 		return err
 	}
 	profileID := pickCodexProfileID(sourceStore)
-	nextStore := sourceStore
-	nextStore.Version = max(sourceStore.Version, targetStore.Version)
+	nextStore, codexPool, err := app.buildDefaultCodexAuthPool(profileName, targetStore)
+	if err != nil {
+		return err
+	}
 
 	targetPath, err := app.resolveAuthStorePath(defaultProfileName)
 	if err != nil {
@@ -3336,7 +4032,24 @@ func (app *App) syncProfileToDefault(profileName string) error {
 	if err != nil {
 		return err
 	}
+	var preservedDefaultAuthRoot map[string]any
+	if pathExists(defaultConfigPath) {
+		buffer, err := os.ReadFile(defaultConfigPath)
+		if err != nil {
+			return err
+		}
+		root, err := decodeJSONObjectOrEmpty(buffer)
+		if err != nil {
+			return err
+		}
+		if authRoot, _ := root["auth"].(map[string]any); authRoot != nil {
+			preservedDefaultAuthRoot = authRoot
+		}
+	}
 	if err := app.copyConfigToDefaultPreservingGlobalSections(sourceConfigPath, defaultConfigPath, "default-openclaw-config", []string{"skills"}); err != nil {
+		return err
+	}
+	if err := app.syncDefaultCodexAuthConfig(codexPool, preservedDefaultAuthRoot); err != nil {
 		return err
 	}
 
@@ -5171,6 +5884,10 @@ func (app *App) gatewayLogPath() string {
 	return filepath.Join(app.watchStateDir(), "logs", "gateway.log")
 }
 
+func (app *App) gatewayErrLogPath() string {
+	return filepath.Join(app.watchStateDir(), "logs", "gateway.err.log")
+}
+
 func (app *App) watchdogLogPath() string {
 	return filepath.Join(app.watchStateDir(), "logs", "watchdog.log")
 }
@@ -5520,15 +6237,23 @@ func parseLogTimestamp(line string) (int64, bool) {
 	if len(matches) != 2 {
 		return 0, false
 	}
-	value := matches[1]
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		parsed, err = time.Parse(time.RFC3339Nano, value)
-		if err != nil {
-			return 0, false
-		}
+	parsed, ok := parseRFC3339Time(matches[1])
+	if !ok {
+		return 0, false
 	}
 	return parsed.UnixMilli(), true
+}
+
+func parseRFC3339Time(value string) (time.Time, bool) {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err == nil {
+		return parsed, true
+	}
+	parsed, err = time.Parse(time.RFC3339Nano, value)
+	if err == nil {
+		return parsed, true
+	}
+	return time.Time{}, false
 }
 
 func parsePmsetTimestamp(value string) time.Time {

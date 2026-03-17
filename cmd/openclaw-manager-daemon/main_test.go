@@ -370,6 +370,246 @@ func TestSyncProfileToDefaultPreservesDefaultSkillsConfig(t *testing.T) {
 	}
 }
 
+func TestSyncProfileToDefaultBuildsDefaultCodexAuthPool(t *testing.T) {
+	rootDir := t.TempDir()
+	writeManagedCodexProfileFixture(t, rootDir, "acct-f", "acct-f-id")
+	writeManagedCodexProfileFixture(t, rootDir, "acct-g", "acct-g-id")
+
+	defaultStateDir := filepath.Join(rootDir, ".openclaw")
+	defaultConfigPath := filepath.Join(defaultStateDir, "openclaw.json")
+	defaultAuthStorePath := filepath.Join(defaultStateDir, "agents", "main", "agent", "auth-profiles.json")
+	if err := writeJSONFile(defaultConfigPath, map[string]any{
+		"agents": map[string]any{
+			"defaults": map[string]any{
+				"model": map[string]any{
+					"primary": "anthropic/claude-sonnet-4",
+				},
+			},
+		},
+		"auth": map[string]any{
+			"profiles": map[string]any{
+				"anthropic:default": map[string]any{
+					"provider": "anthropic",
+					"mode":     "api-key",
+				},
+				"openai-codex:stale": map[string]any{
+					"provider": "openai-codex",
+					"mode":     "oauth",
+				},
+			},
+			"order": map[string]any{
+				"anthropic":    []string{"anthropic:default"},
+				"openai-codex": []string{"openai-codex:stale"},
+			},
+		},
+		"skills": map[string]any{
+			"entries": map[string]any{
+				"4todo": map[string]any{
+					"enabled": true,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("write default config: %v", err)
+	}
+
+	defaultStore := defaultAuthStore()
+	defaultStore.Profiles["anthropic:default"] = map[string]any{
+		"type":     "api-key",
+		"provider": "anthropic",
+		"apiKey":   "anthropic-secret",
+	}
+	defaultStore.UsageStats["anthropic:default"] = map[string]any{
+		"lastUsed": int64(123),
+	}
+	defaultStore.UsageStats["openai-codex:acct-g"] = map[string]any{
+		"cooldownUntil": "2099-01-01T00:00:00Z",
+		"errorCount":    7,
+	}
+	if err := writeJSONFile(defaultAuthStorePath, defaultStore); err != nil {
+		t.Fatalf("write default auth store: %v", err)
+	}
+
+	app := &App{
+		homeDir:              rootDir,
+		openclawHomeDir:      rootDir,
+		codexHomeDir:         rootDir,
+		managerDir:           filepath.Join(rootDir, ".manager"),
+		backupDir:            filepath.Join(rootDir, ".manager", "backups"),
+		defaultOpenClawState: defaultStateDir,
+		stateDirCache:        map[string]string{},
+	}
+
+	if err := app.syncProfileToDefault("acct-f"); err != nil {
+		t.Fatalf("syncProfileToDefault: %v", err)
+	}
+
+	mergedStore, err := app.loadAuthStore(defaultProfileName)
+	if err != nil {
+		t.Fatalf("loadAuthStore(default): %v", err)
+	}
+	if got := mergedStore.LastGood["openai-codex"]; got != "openai-codex:acct-f" {
+		t.Fatalf("expected active account to become lastGood, got %q", got)
+	}
+	if _, ok := mergedStore.Profiles["openai-codex:acct-f"]; !ok {
+		t.Fatalf("expected acct-f runtime auth profile")
+	}
+	if _, ok := mergedStore.Profiles["openai-codex:acct-g"]; !ok {
+		t.Fatalf("expected acct-g runtime auth profile")
+	}
+	if _, ok := mergedStore.Profiles["anthropic:default"]; !ok {
+		t.Fatalf("expected non-codex auth profile to be preserved")
+	}
+	if got := anyString(mergedStore.UsageStats["openai-codex:acct-g"]["cooldownUntil"]); got != "2099-01-01T00:00:00Z" {
+		t.Fatalf("expected target cooldown metadata to be preserved, got %q", got)
+	}
+	if errorCount, ok := anyInt64(mergedStore.UsageStats["openai-codex:acct-g"]["errorCount"]); !ok || errorCount != 7 {
+		t.Fatalf("expected preserved errorCount=7, got %v ok=%v", mergedStore.UsageStats["openai-codex:acct-g"]["errorCount"], ok)
+	}
+
+	var merged map[string]any
+	data, err := os.ReadFile(defaultConfigPath)
+	if err != nil {
+		t.Fatalf("read merged default config: %v", err)
+	}
+	if err := json.Unmarshal(data, &merged); err != nil {
+		t.Fatalf("unmarshal merged default config: %v", err)
+	}
+
+	model := derefString(readOpenClawConfigSnapshot(defaultConfigPath).PrimaryModelID)
+	if model != "openai-codex/gpt-5" {
+		t.Fatalf("expected source model to sync into default config, got %s", model)
+	}
+	authMap, ok := merged["auth"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected auth section in merged config")
+	}
+	profilesMap, ok := authMap["profiles"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected auth.profiles in merged config")
+	}
+	if _, ok := profilesMap["openai-codex:acct-f"]; !ok {
+		t.Fatalf("expected acct-f auth profile entry in default config")
+	}
+	if _, ok := profilesMap["openai-codex:acct-g"]; !ok {
+		t.Fatalf("expected acct-g auth profile entry in default config")
+	}
+	if _, ok := profilesMap["anthropic:default"]; !ok {
+		t.Fatalf("expected non-codex auth config entry to be preserved")
+	}
+	if _, ok := profilesMap["openai-codex:stale"]; ok {
+		t.Fatalf("expected stale codex config entry to be removed")
+	}
+	orderMap, ok := authMap["order"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected auth.order in merged config")
+	}
+	order := anyStrings(orderMap["openai-codex"])
+	if len(order) != 2 || order[0] != "openai-codex:acct-f" || order[1] != "openai-codex:acct-g" {
+		t.Fatalf("expected active-first codex order, got %v", order)
+	}
+
+	defaultCodexAuth := readJSONFile(resolveCodexAuthPath(defaultProfileName, rootDir), CodexAuthFile{})
+	if defaultCodexAuth.Tokens.AccountID != "acct-f-id" {
+		t.Fatalf("expected active codex auth file to sync, got account %q", defaultCodexAuth.Tokens.AccountID)
+	}
+}
+
+func TestResolveCurrentRuntimeAuthSelectionMapsBackToManagedProfile(t *testing.T) {
+	rootDir := t.TempDir()
+	writeManagedCodexProfileFixture(t, rootDir, "acct-f", "acct-f-id")
+	writeManagedCodexProfileFixture(t, rootDir, "acct-g", "acct-g-id")
+
+	defaultStateDir := filepath.Join(rootDir, ".openclaw")
+	defaultConfigPath := filepath.Join(defaultStateDir, "openclaw.json")
+	defaultAuthStorePath := filepath.Join(defaultStateDir, "agents", "main", "agent", "auth-profiles.json")
+	if err := writeJSONFile(defaultConfigPath, map[string]any{
+		"agents": map[string]any{
+			"defaults": map[string]any{
+				"model": map[string]any{
+					"primary": "openai-codex/gpt-5",
+				},
+			},
+		},
+		"auth": map[string]any{
+			"profiles": map[string]any{},
+		},
+	}); err != nil {
+		t.Fatalf("write default config: %v", err)
+	}
+	if err := writeJSONFile(defaultAuthStorePath, defaultAuthStore()); err != nil {
+		t.Fatalf("write default auth store: %v", err)
+	}
+
+	app := &App{
+		homeDir:              rootDir,
+		openclawHomeDir:      rootDir,
+		codexHomeDir:         rootDir,
+		managerDir:           filepath.Join(rootDir, ".manager"),
+		backupDir:            filepath.Join(rootDir, ".manager", "backups"),
+		defaultOpenClawState: defaultStateDir,
+		stateDirCache:        map[string]string{},
+	}
+
+	if err := app.syncProfileToDefault("acct-f"); err != nil {
+		t.Fatalf("syncProfileToDefault: %v", err)
+	}
+
+	store, err := app.loadAuthStore(defaultProfileName)
+	if err != nil {
+		t.Fatalf("loadAuthStore(default): %v", err)
+	}
+	store.LastGood["openai-codex"] = "openai-codex:acct-g"
+	store.UsageStats["openai-codex:acct-g"] = map[string]any{
+		"lastUsed": int64(1893456000000),
+	}
+	if err := app.saveAuthStore(defaultProfileName, store); err != nil {
+		t.Fatalf("saveAuthStore(default): %v", err)
+	}
+
+	profiles := []ManagedProfileSnapshot{
+		{
+			Name:         defaultProfileName,
+			IsDefault:    true,
+			AccountID:    ptr("acct-f-id"),
+			AccountEmail: ptr("default@example.com"),
+		},
+		{
+			Name:         "acct-f",
+			AccountID:    ptr("acct-f-id"),
+			AccountEmail: ptr("acct-f@example.com"),
+		},
+		{
+			Name:         "acct-g",
+			AccountID:    ptr("acct-g-id"),
+			AccountEmail: ptr("acct-g@example.com"),
+		},
+	}
+
+	selection := app.resolveCurrentRuntimeAuthSelection(profiles)
+	if selection == nil {
+		t.Fatalf("expected runtime auth selection")
+	}
+	if derefString(selection.ProviderID) != "openai-codex" {
+		t.Fatalf("unexpected provider: %v", selection.ProviderID)
+	}
+	if derefString(selection.ProfileID) != "openai-codex:acct-g" {
+		t.Fatalf("unexpected profile id: %v", selection.ProfileID)
+	}
+	if derefString(selection.ManagedProfileName) != "acct-g" {
+		t.Fatalf("expected mapped managed profile acct-g, got %v", selection.ManagedProfileName)
+	}
+	if derefString(selection.AccountEmail) != "acct-g@example.com" {
+		t.Fatalf("expected managed profile email, got %v", selection.AccountEmail)
+	}
+	if derefString(selection.AccountID) != "acct-g-id" {
+		t.Fatalf("expected managed profile account id, got %v", selection.AccountID)
+	}
+	if selection.LastUsedAt == nil || *selection.LastUsedAt == "" {
+		t.Fatalf("expected lastUsedAt to be populated")
+	}
+}
+
 func writeProfileConfigFixture(t *testing.T, rootDir, profileName string) {
 	t.Helper()
 
@@ -398,5 +638,35 @@ func writeProfileConfigFixture(t *testing.T, rootDir, profileName string) {
 	}
 	if err := writeJSONFile(authStorePath, defaultAuthStore()); err != nil {
 		t.Fatalf("write auth store: %v", err)
+	}
+}
+
+func writeManagedCodexProfileFixture(t *testing.T, rootDir, profileName, accountID string) {
+	t.Helper()
+
+	writeProfileConfigFixture(t, rootDir, profileName)
+
+	stateDir := filepath.Join(rootDir, ".openclaw-"+profileName)
+	authStorePath := filepath.Join(stateDir, "agents", "main", "agent", "auth-profiles.json")
+	tokens := OAuthTokens{
+		Access:    "access-" + profileName,
+		Refresh:   "refresh-" + profileName,
+		IDToken:   "id-" + profileName,
+		Expires:   1893456000000,
+		AccountID: accountID,
+	}
+
+	store := defaultAuthStore()
+	upsertOpenAICodexCredential(&store, "openai-codex:default", tokens)
+	if err := writeJSONFile(authStorePath, store); err != nil {
+		t.Fatalf("write codex auth store: %v", err)
+	}
+
+	authFile, err := buildCodexAuthFile(tokens)
+	if err != nil {
+		t.Fatalf("build codex auth file: %v", err)
+	}
+	if err := writeJSONFile(resolveCodexAuthPath(profileName, rootDir), authFile); err != nil {
+		t.Fatalf("write codex auth file: %v", err)
 	}
 }

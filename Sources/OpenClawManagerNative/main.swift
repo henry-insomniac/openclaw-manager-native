@@ -462,7 +462,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
             let active = summary.activeProfileName ?? "未激活"
             let recommended = summary.recommendedProfileName ?? "无"
             let automation = summary.automation.enabled ? "已开启" : "已关闭"
-            return "当前: \(active)\n推荐: \(recommended)\n自动切换: \(automation)"
+            let runtimeAuth = summary.runtime.switching.currentAuthSelection?.managedProfileName
+                ?? summary.runtime.switching.currentAuthSelection?.profileId
+                ?? "未记录"
+            return "当前: \(active)\n推荐: \(recommended)\n运行 auth: \(runtimeAuth)\n自动切换: \(automation)"
         }
 
         if let lastMenuBarError, !lastMenuBarError.isEmpty {
@@ -505,9 +508,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, @u
 
         if let summary = latestManagerSummary {
             let activeLabel = activeMenuBarProfile()?.accountEmail ?? summary.activeProfileName ?? "未激活"
+            let runtimeAuthLabel = summary.runtime.switching.currentAuthSelection?.managedProfileName
+                ?? summary.runtime.switching.currentAuthSelection?.profileId
+                ?? "未记录"
             menu.addItem(makeStatusInfoItem("当前: \(summary.activeProfileName ?? "未激活")"))
             menu.addItem(makeStatusInfoItem("账号: \(activeLabel)"))
             menu.addItem(makeStatusInfoItem("推荐: \(summary.recommendedProfileName ?? "无")"))
+            menu.addItem(makeStatusInfoItem("运行 auth: \(runtimeAuthLabel)"))
             menu.addItem(makeStatusInfoItem("自动切换: \(summary.automation.enabled ? "已开启" : "已关闭")"))
             menu.addItem(makeStatusInfoItem("已发现 profile: \(summary.profiles.count)"))
             if let reason = summary.automation.lastAutoActivationReason, !reason.isEmpty {

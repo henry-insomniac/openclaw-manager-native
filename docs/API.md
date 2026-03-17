@@ -47,6 +47,11 @@ http://127.0.0.1:3311
   - 不是账号订阅时效，也不是 5h / week 配额窗口
 - `profiles[].quota.fiveHour` / `profiles[].quota.week`
   - 表示远端 usage 窗口、剩余额度百分比和重置时间
+- `runtime.switching.currentAuthSelection`
+  - 表示 runtime 最近成功使用的 auth profile
+  - 由默认位 auth store 的 `lastGood + usageStats.lastUsed` 推导，当前会返回 `providerId` / `profileId` / `managedProfileName` / `accountEmail` / `accountId` / `lastUsedAt`
+- `profiles[].status == cooldown`
+  - 表示最近命中过 runtime API rate limit，manager 会在短时间内暂时避开这个账号，减少刚切走又切回去的抖动
 
 ### `GET /api/openclaw/system`
 

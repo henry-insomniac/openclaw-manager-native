@@ -12,6 +12,9 @@ VERSIONED_DELIVERY_ZIP="$RELEASE_DIR/OpenClawManagerNative-$VERSION-delivery.zip
 APP_ZIP_PATH="$RELEASE_DIR/$APP_NAME-$VERSION-arm64-mac.zip"
 DMG_PATH="$RELEASE_DIR/$APP_NAME-$VERSION-arm64.dmg"
 PKG_PATH="$RELEASE_DIR/$APP_NAME-$VERSION-arm64.pkg"
+PUBLIC_APP_ZIP_PATH="$RELEASE_DIR/OpenClaw.Manager.Native-$VERSION-arm64-mac.zip"
+PUBLIC_DMG_PATH="$RELEASE_DIR/OpenClaw.Manager.Native-$VERSION-arm64.dmg"
+PUBLIC_PKG_PATH="$RELEASE_DIR/OpenClaw.Manager.Native-$VERSION-arm64.pkg"
 CHECKSUMS_PATH="$RELEASE_DIR/OpenClawManagerNative-$VERSION-SHA256SUMS.txt"
 OPENCLAW_RELEASE_TIMESTAMP="${OPENCLAW_RELEASE_TIMESTAMP:-$(date '+%Y%m%d-%H%M%S')}"
 export OPENCLAW_RELEASE_TIMESTAMP
@@ -46,14 +49,17 @@ fi
 cp -f "$APP_ZIP_PATH" "$RELEASE_DIR/OpenClawManagerNative-latest-arm64.zip"
 cp -f "$DMG_PATH" "$RELEASE_DIR/OpenClawManagerNative-latest-arm64.dmg"
 cp -f "$PKG_PATH" "$RELEASE_DIR/OpenClawManagerNative-latest-arm64.pkg"
+cp -f "$APP_ZIP_PATH" "$PUBLIC_APP_ZIP_PATH"
+cp -f "$DMG_PATH" "$PUBLIC_DMG_PATH"
+cp -f "$PKG_PATH" "$PUBLIC_PKG_PATH"
 
 rm -rf "$DELIVERY_DIR"
 mkdir -p "$DELIVERY_DIR"
 
-cp "$APP_ZIP_PATH" "$DELIVERY_DIR/"
-cp "$DMG_PATH" "$DELIVERY_DIR/"
+cp "$PUBLIC_APP_ZIP_PATH" "$DELIVERY_DIR/"
+cp "$PUBLIC_DMG_PATH" "$DELIVERY_DIR/"
 cp "$TIMESTAMPED_DMG_PATH" "$DELIVERY_DIR/"
-cp "$PKG_PATH" "$DELIVERY_DIR/"
+cp "$PUBLIC_PKG_PATH" "$DELIVERY_DIR/"
 cp "$ROOT_DIR/README.md" "$DELIVERY_DIR/"
 cp "$ROOT_DIR/INSTALL.md" "$DELIVERY_DIR/"
 cp "$ROOT_DIR/QUICKSTART.md" "$DELIVERY_DIR/"
@@ -63,10 +69,10 @@ rm -f "$CHECKSUMS_PATH"
 (
   cd "$RELEASE_DIR"
   shasum -a 256 \
-    "$(basename "$APP_ZIP_PATH")" \
-    "$(basename "$DMG_PATH")" \
+    "$(basename "$PUBLIC_APP_ZIP_PATH")" \
+    "$(basename "$PUBLIC_DMG_PATH")" \
     "$(basename "$TIMESTAMPED_DMG_PATH")" \
-    "$(basename "$PKG_PATH")" > "$(basename "$CHECKSUMS_PATH")"
+    "$(basename "$PUBLIC_PKG_PATH")" > "$(basename "$CHECKSUMS_PATH")"
 )
 cp "$CHECKSUMS_PATH" "$DELIVERY_DIR/"
 

@@ -220,8 +220,18 @@ struct RuntimeOverview: Decodable, Equatable, Sendable {
     }
 
     struct Switching: Decodable, Equatable, Sendable {
+        struct AuthSelection: Decodable, Equatable, Sendable {
+            var providerId: String? = nil
+            var profileId: String? = nil
+            var managedProfileName: String? = nil
+            var accountEmail: String? = nil
+            var accountId: String? = nil
+            var lastUsedAt: String? = nil
+        }
+
         var activeProfileName: String?
         var recommendedProfileName: String?
+        var currentAuthSelection: AuthSelection? = nil
         var totalProfiles: Int
         var healthyProfiles: Int
         var drainingProfiles: Int

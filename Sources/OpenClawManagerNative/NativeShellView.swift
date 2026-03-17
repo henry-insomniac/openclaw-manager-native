@@ -315,6 +315,37 @@ private func present(_ value: String?, fallback: String = "未提供") -> String
     return value
 }
 
+private func runtimeAuthLabel(_ selection: RuntimeOverview.Switching.AuthSelection?) -> String {
+    if let managedProfileName = selection?.managedProfileName, !managedProfileName.isEmpty {
+        return managedProfileName
+    }
+    if let profileId = selection?.profileId, !profileId.isEmpty {
+        return profileId
+    }
+    return "尚未记录"
+}
+
+private func runtimeAuthDetail(_ selection: RuntimeOverview.Switching.AuthSelection?) -> String {
+    guard let selection else {
+        return "等待 OpenClaw runtime 回传最近成功使用的 auth profile"
+    }
+
+    var parts: [String] = []
+    if let providerId = selection.providerId, !providerId.isEmpty {
+        parts.append(providerLabel(providerId))
+    }
+    if let accountEmail = selection.accountEmail, !accountEmail.isEmpty {
+        parts.append(accountEmail)
+    } else if let accountId = selection.accountId, !accountId.isEmpty {
+        parts.append(shortAccountId(accountId))
+    }
+    if let lastUsedAt = selection.lastUsedAt {
+        parts.append("最近成功 \(formatDate(lastUsedAt))")
+    }
+
+    return parts.isEmpty ? "最近成功使用的 auth profile 尚未落盘" : parts.joined(separator: " · ")
+}
+
 private func containsChinese(_ text: String) -> Bool {
     text.range(of: "\\p{Script=Han}", options: .regularExpression) != nil
 }
@@ -1229,6 +1260,7 @@ private struct NativeHeaderView: View {
             CompactMetaRow(label: "API 地址", value: present(runtime?.daemon.apiBaseUrl, fallback: "等待本地 API"))
             CompactMetaRow(label: "回调地址", value: present(store.localSnapshot.callbackURL ?? runtime?.roots.oauthCallbackUrl))
             CompactMetaRow(label: "最新切换", value: formatDate(runtime?.switching.lastActivationAt), detail: present(runtime?.switching.lastActivationReason, fallback: "还没有切换记录"))
+            CompactMetaRow(label: "运行 auth", value: runtimeAuthLabel(runtime?.switching.currentAuthSelection), detail: runtimeAuthDetail(runtime?.switching.currentAuthSelection))
         }
         .padding(16)
         .background(
@@ -1608,6 +1640,7 @@ private struct OverviewSection: View {
             items += [
                 ("总账号数", "\(runtime.switching.totalProfiles)"),
                 ("健康账号", "\(runtime.switching.healthyProfiles)"),
+                ("运行 auth", runtimeAuthLabel(runtime.switching.currentAuthSelection)),
                 ("最近切换", formatDate(runtime.switching.lastActivationAt)),
                 ("切换触发", activationTriggerLabel(runtime.switching.lastActivationTrigger)),
                 ("下一次检查", formatDate(runtime.daemon.nextProbeAt)),
